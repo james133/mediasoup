@@ -1,5 +1,5 @@
 #define MS_CLASS "RTC::UdpSocket"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/UdpSocket.hpp"
 #include "Logger.hpp"
@@ -24,7 +24,7 @@ namespace RTC
 		PortManager::UnbindUdp(this->localIp, this->localPort);
 	}
 
-	void UdpSocket::UserOnUdpDatagramRecv(const uint8_t* data, size_t len, const struct sockaddr* addr)
+	void UdpSocket::UserOnUdpDatagramReceived(const uint8_t* data, size_t len, const struct sockaddr* addr)
 	{
 		MS_TRACE();
 
@@ -36,6 +36,6 @@ namespace RTC
 		}
 
 		// Notify the reader.
-		this->listener->OnPacketRecv(this, data, len, addr);
+		this->listener->OnUdpSocketPacketReceived(this, data, len, addr);
 	}
 } // namespace RTC

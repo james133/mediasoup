@@ -1,5 +1,6 @@
 /node_modules/
 /coverage/
+/NO_GIT/
 
 # clang-tidy stuff.
 /worker/compile_commands.json
@@ -7,6 +8,10 @@
 # gyp generated stuff.
 /worker/out/
 /worker/**/*.xcodeproj/
+/worker/**/*.sln
+/worker/**/*.vcxproj
+/worker/**/*.vcxproj.filters
+/worker/**/*.vcxproj.user
 
 # clang-fuzzer stuff is too big.
 /worker/deps/clang-fuzzer
@@ -18,3 +23,17 @@
 # Vim temporal files.
 *.swp
 *.swo
+
+# Mac Stuff.
+.DS_Store
+
+# Python generated stuff in Windows.
+/worker/scripts/configure.pyc
+
+# Vistual Studio generated Stuff.
+/worker/**/Debug/
+/worker/**/Release/
+/worker/.vs/
+
+# Vistual Studio Code stuff.
+/.vscode/

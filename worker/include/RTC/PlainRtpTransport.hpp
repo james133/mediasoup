@@ -27,30 +27,18 @@ namespace RTC
 
 	private:
 		bool IsConnected() const override;
-		void SendRtpPacket(
-		  RTC::RtpPacket* packet,
-		  RTC::Consumer* consumer,
-		  bool retransmitted = false,
-		  bool probation     = false) override;
+		void SendRtpPacket(RTC::RtpPacket* packet, RTC::Transport::onSendCallback* cb = nullptr) override;
 		void SendRtcpPacket(RTC::RTCP::Packet* packet) override;
 		void SendRtcpCompoundPacket(RTC::RTCP::CompoundPacket* packet) override;
-		void OnPacketRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
-		void OnRtpDataRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
-		void OnRtcpDataRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
-
-		/* Pure virtual methods inherited from RTC::Transport. */
-	private:
-		void UserOnNewProducer(RTC::Producer* producer) override;
-		void UserOnNewConsumer(RTC::Consumer* consumer) override;
-		void UserOnRembFeedback(RTC::RTCP::FeedbackPsRembPacket* remb) override;
-
-		/* Pure virtual methods inherited from RTC::Consumer::Listener. */
-	public:
-		void OnConsumerNeedBitrateChange(RTC::Consumer* consumer) override;
+		void SendSctpData(const uint8_t* data, size_t len) override;
+		void OnPacketReceived(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
+		void OnRtpDataReceived(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
+		void OnRtcpDataReceived(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
+		void OnSctpDataReceived(RTC::TransportTuple* tuple, const uint8_t* data, size_t len);
 
 		/* Pure virtual methods inherited from RTC::UdpSocket::Listener. */
 	public:
-		void OnPacketRecv(
+		void OnUdpSocketPacketReceived(
 		  RTC::UdpSocket* socket, const uint8_t* data, size_t len, const struct sockaddr* remoteAddr) override;
 
 	private:

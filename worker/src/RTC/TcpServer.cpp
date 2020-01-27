@@ -1,5 +1,5 @@
 #define MS_CLASS "RTC::TcpServer"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/TcpServer.hpp"
 #include "Logger.hpp"
@@ -16,7 +16,7 @@ namespace RTC
 
 	TcpServer::TcpServer(Listener* listener, RTC::TcpConnection::Listener* connListener, std::string& ip)
 	  : // This may throw.
-	    ::TcpServer::TcpServer(PortManager::BindTcp(ip), 256), listener(listener),
+	    ::TcpServer::TcpServer(RTC::PortManager::BindTcp(ip), 256), listener(listener),
 	    connListener(connListener)
 	{
 		MS_TRACE();
@@ -26,31 +26,32 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		PortManager::UnbindTcp(this->localIp, this->localPort);
+		RTC::PortManager::UnbindTcp(this->localIp, this->localPort);
 	}
 
-	void TcpServer::UserOnTcpConnectionAlloc(::TcpConnection** connection)
-	{
-		MS_TRACE();
-
-		// Allocate a new RTC::TcpConnection for the TcpServer to handle it.
-		*connection = new RTC::TcpConnection(this->connListener, 65536);
-	}
-
-	void TcpServer::UserOnNewTcpConnection(::TcpConnection* connection)
+	void TcpServer::UserOnTcpConnectionAlloc()
 	{
 		MS_TRACE();
 
 		// Allow just MaxTcpConnectionsPerServer.
-		if (GetNumConnections() > MaxTcpConnectionsPerServer)
-			delete connection;
+		if (GetNumConnections() >= MaxTcpConnectionsPerServer)
+		{
+			MS_ERROR("cannot handle more than %zu connections", MaxTcpConnectionsPerServer);
+
+			return;
+		}
+
+		// Allocate a new RTC::TcpConnection for the TcpServer to handle it.
+		auto* connection = new RTC::TcpConnection(this->connListener, 65536);
+
+		// Accept it.
+		AcceptTcpConnection(connection);
 	}
 
-	void TcpServer::UserOnTcpConnectionClosed(::TcpConnection* connection, bool isClosedByPeer)
+	void TcpServer::UserOnTcpConnectionClosed(::TcpConnection* connection)
 	{
 		MS_TRACE();
 
-		this->listener->OnRtcTcpConnectionClosed(
-		  this, static_cast<RTC::TcpConnection*>(connection), isClosedByPeer);
+		this->listener->OnRtcTcpConnectionClosed(this, static_cast<RTC::TcpConnection*>(connection));
 	}
 } // namespace RTC

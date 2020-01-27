@@ -56,6 +56,7 @@ mediasoup and its client side libraries provide a super low level API. They are 
 * Simulcast and SVC support.
 * Congestion control.
 * Sender and receiver bandwidth estimation with spatial/temporal layers distribution algorithm.
+* SCTP support (WebRTC DataChannels and SCTP over plain UDP).
 * Extremely powerful (media worker subprocess coded in C++ on top of [libuv](https://libuv.org)).
 
 
@@ -70,11 +71,6 @@ Try it at [v3demo.mediasoup.org](https://v3demo.mediasoup.org) ([source code](ht
 
 * Iñaki Baz Castillo [[website](https://inakibaz.me)|[github](https://github.com/ibc/)]
 * José Luis Millán [[github](https://github.com/jmillan/)]
-
-
-## Sponsors
-
-* [46 Labs LLC](https://46labs.com): Special thanks to 46 Labs where we both, José Luis and Iñaki, develop a mediasoup based multiparty video conferencing app focused on the enterprise market for more than a year.
 
 
 ## Donate

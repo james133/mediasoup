@@ -1,10 +1,12 @@
 #define MS_CLASS "mediasoup-worker"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "common.hpp"
 #include "DepLibSRTP.hpp"
 #include "DepLibUV.hpp"
+#include "DepLibWebRTC.hpp"
 #include "DepOpenSSL.hpp"
+#include "DepUsrSCTP.hpp"
 #include "Logger.hpp"
 #include "MediaSoupErrors.hpp"
 #include "Settings.hpp"
@@ -14,15 +16,16 @@
 #include "Channel/UnixStreamSocket.hpp"
 #include "RTC/DtlsTransport.hpp"
 #include "RTC/SrtpSession.hpp"
+#include <uv.h>
 #include <cerrno>
 #include <csignal>  // sigaction()
 #include <cstdlib>  // std::_Exit(), std::genenv()
 #include <iostream> // std::cerr, std::endl
 #include <map>
 #include <string>
-#include <unistd.h> // usleep()
 
-static constexpr int ChannelFd{ 3 };
+static constexpr int ConsumerChannelFd{ 3 };
+static constexpr int ProducerChannelFd{ 4 };
 
 void IgnoreSignals();
 
@@ -46,7 +49,7 @@ int main(int argc, char* argv[])
 
 	try
 	{
-		channel = new Channel::UnixStreamSocket(ChannelFd);
+		channel = new Channel::UnixStreamSocket(ConsumerChannelFd, ProducerChannelFd);
 	}
 	catch (const MediaSoupError& error)
 	{
@@ -102,6 +105,8 @@ int main(int argc, char* argv[])
 		// Initialize static stuff.
 		DepOpenSSL::ClassInit();
 		DepLibSRTP::ClassInit();
+		DepUsrSCTP::ClassInit();
+		DepLibWebRTC::ClassInit();
 		Utils::Crypto::ClassInit();
 		RTC::DtlsTransport::ClassInit();
 		RTC::SrtpSession::ClassInit();
@@ -117,11 +122,14 @@ int main(int argc, char* argv[])
 		DepLibUV::ClassDestroy();
 		DepLibSRTP::ClassDestroy();
 		Utils::Crypto::ClassDestroy();
+		DepLibWebRTC::ClassDestroy();
 		RTC::DtlsTransport::ClassDestroy();
+		DepUsrSCTP::ClassDestroy();
 
 		// Wait a bit so peding messages to stdout/Channel arrive to the Node
 		// process.
-		usleep(200000);
+		uv_sleep(200);
+
 		std::_Exit(EXIT_SUCCESS);
 	}
 	catch (const MediaSoupError& error)
@@ -134,6 +142,7 @@ int main(int argc, char* argv[])
 
 void IgnoreSignals()
 {
+#ifndef _WIN32
 	MS_TRACE();
 
 	int err;
@@ -167,4 +176,5 @@ void IgnoreSignals()
 		if (err != 0)
 			MS_THROW_ERROR("sigaction() failed for signal %s: %s", sigName.c_str(), std::strerror(errno));
 	}
+#endif
 }

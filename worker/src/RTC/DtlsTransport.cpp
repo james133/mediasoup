@@ -1,5 +1,5 @@
 #define MS_CLASS "RTC::DtlsTransport"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/DtlsTransport.hpp"
 #include "Logger.hpp"
@@ -60,13 +60,21 @@ namespace RTC
 {
 	/* Static. */
 
+	// clang-format off
 	static constexpr int DtlsMtu{ 1350 };
 	static constexpr int SslReadBufferSize{ 65536 };
-	// NOTE: Those values are hardcoded as we just use AES_CM_128_HMAC_SHA1_80 and
-	// AES_CM_128_HMAC_SHA1_32 which share same length values for key and salt.
+	// AES-HMAC: http://tools.ietf.org/html/rfc3711
 	static constexpr size_t SrtpMasterKeyLength{ 16 };
 	static constexpr size_t SrtpMasterSaltLength{ 14 };
 	static constexpr size_t SrtpMasterLength{ SrtpMasterKeyLength + SrtpMasterSaltLength };
+	// AES-GCM: http://tools.ietf.org/html/rfc7714
+	static constexpr size_t SrtpAesGcm256MasterKeyLength{ 32 };
+	static constexpr size_t SrtpAesGcm256MasterSaltLength{ 12 };
+	static constexpr size_t SrtpAesGcm256MasterLength{ SrtpAesGcm256MasterKeyLength + SrtpAesGcm256MasterSaltLength };
+	static constexpr size_t SrtpAesGcm128MasterKeyLength{ 16 };
+	static constexpr size_t SrtpAesGcm128MasterSaltLength{ 12 };
+	static constexpr size_t SrtpAesGcm128MasterLength{ SrtpAesGcm128MasterKeyLength + SrtpAesGcm128MasterSaltLength };
+	// clang-format on
 
 	/* Class variables. */
 
@@ -102,6 +110,8 @@ namespace RTC
 	// clang-format off
 	std::vector<DtlsTransport::SrtpProfileMapEntry> DtlsTransport::srtpProfiles =
 	{
+		{ RTC::SrtpSession::Profile::AEAD_AES_256_GCM, "SRTP_AEAD_AES_256_GCM" },
+		{ RTC::SrtpSession::Profile::AEAD_AES_128_GCM, "SRTP_AEAD_AES_128_GCM" },
 		{ RTC::SrtpSession::Profile::AES_CM_128_HMAC_SHA1_80, "SRTP_AES128_CM_SHA1_80" },
 		{ RTC::SrtpSession::Profile::AES_CM_128_HMAC_SHA1_32, "SRTP_AES128_CM_SHA1_32" }
 	};
@@ -136,11 +146,11 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		if (DtlsTransport::privateKey != nullptr)
+		if (DtlsTransport::privateKey)
 			EVP_PKEY_free(DtlsTransport::privateKey);
-		if (DtlsTransport::certificate != nullptr)
+		if (DtlsTransport::certificate)
 			X509_free(DtlsTransport::certificate);
-		if (DtlsTransport::sslCtx != nullptr)
+		if (DtlsTransport::sslCtx)
 			SSL_CTX_free(DtlsTransport::sslCtx);
 	}
 
@@ -159,9 +169,10 @@ namespace RTC
 		// Create a big number object.
 		bne = BN_new();
 
-		if (bne == nullptr)
+		if (!bne)
 		{
 			LOG_OPENSSL_ERROR("BN_new() failed");
+
 			goto error;
 		}
 
@@ -170,15 +181,17 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("BN_set_word() failed");
+
 			goto error;
 		}
 
 		// Generate a RSA key.
 		rsaKey = RSA_new();
 
-		if (rsaKey == nullptr)
+		if (!rsaKey)
 		{
 			LOG_OPENSSL_ERROR("RSA_new() failed");
+
 			goto error;
 		}
 
@@ -188,15 +201,17 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("RSA_generate_key_ex() failed");
+
 			goto error;
 		}
 
 		// Create a private key object (needed to hold the RSA key).
 		DtlsTransport::privateKey = EVP_PKEY_new();
 
-		if (DtlsTransport::privateKey == nullptr)
+		if (!DtlsTransport::privateKey)
 		{
 			LOG_OPENSSL_ERROR("EVP_PKEY_new() failed");
+
 			goto error;
 		}
 
@@ -205,6 +220,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("EVP_PKEY_assign_RSA() failed");
+
 			goto error;
 		}
 		// The RSA key now belongs to the private key, so don't clean it up separately.
@@ -213,9 +229,10 @@ namespace RTC
 		// Create the X509 certificate.
 		DtlsTransport::certificate = X509_new();
 
-		if (DtlsTransport::certificate == nullptr)
+		if (!DtlsTransport::certificate)
 		{
 			LOG_OPENSSL_ERROR("X509_new() failed");
+
 			goto error;
 		}
 
@@ -237,15 +254,17 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("X509_set_pubkey() failed");
+
 			goto error;
 		}
 
 		// Set certificate fields.
 		certName = X509_get_subject_name(DtlsTransport::certificate);
 
-		if (certName == nullptr)
+		if (!certName)
 		{
 			LOG_OPENSSL_ERROR("X509_get_subject_name() failed");
+
 			goto error;
 		}
 
@@ -260,6 +279,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("X509_set_issuer_name() failed");
+
 			goto error;
 		}
 
@@ -269,6 +289,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("X509_sign() failed");
+
 			goto error;
 		}
 
@@ -279,16 +300,16 @@ namespace RTC
 
 	error:
 
-		if (bne != nullptr)
+		if (bne)
 			BN_free(bne);
 
-		if ((rsaKey != nullptr) && (DtlsTransport::privateKey == nullptr))
+		if (rsaKey && !DtlsTransport::privateKey)
 			RSA_free(rsaKey);
 
-		if (DtlsTransport::privateKey != nullptr)
+		if (DtlsTransport::privateKey)
 			EVP_PKEY_free(DtlsTransport::privateKey); // NOTE: This also frees the RSA key.
 
-		if (DtlsTransport::certificate != nullptr)
+		if (DtlsTransport::certificate)
 			X509_free(DtlsTransport::certificate);
 
 		MS_THROW_ERROR("DTLS certificate and private key generation failed");
@@ -302,17 +323,19 @@ namespace RTC
 
 		file = fopen(Settings::configuration.dtlsCertificateFile.c_str(), "r");
 
-		if (file == nullptr)
+		if (!file)
 		{
 			MS_ERROR("error reading DTLS certificate file: %s", std::strerror(errno));
+
 			goto error;
 		}
 
 		DtlsTransport::certificate = PEM_read_X509(file, nullptr, nullptr, nullptr);
 
-		if (DtlsTransport::certificate == nullptr)
+		if (!DtlsTransport::certificate)
 		{
 			LOG_OPENSSL_ERROR("PEM_read_X509() failed");
+
 			goto error;
 		}
 
@@ -320,17 +343,19 @@ namespace RTC
 
 		file = fopen(Settings::configuration.dtlsPrivateKeyFile.c_str(), "r");
 
-		if (file == nullptr)
+		if (!file)
 		{
 			MS_ERROR("error reading DTLS private key file: %s", std::strerror(errno));
+
 			goto error;
 		}
 
 		DtlsTransport::privateKey = PEM_read_PrivateKey(file, nullptr, nullptr, nullptr);
 
-		if (DtlsTransport::privateKey == nullptr)
+		if (!DtlsTransport::privateKey)
 		{
 			LOG_OPENSSL_ERROR("PEM_read_PrivateKey() failed");
+
 			goto error;
 		}
 
@@ -363,9 +388,10 @@ namespace RTC
 #error "too old OpenSSL version"
 #endif
 
-		if (DtlsTransport::sslCtx == nullptr)
+		if (!DtlsTransport::sslCtx)
 		{
 			LOG_OPENSSL_ERROR("SSL_CTX_new() failed");
+
 			goto error;
 		}
 
@@ -374,6 +400,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("SSL_CTX_use_certificate() failed");
+
 			goto error;
 		}
 
@@ -382,6 +409,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("SSL_CTX_use_PrivateKey() failed");
+
 			goto error;
 		}
 
@@ -390,6 +418,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("SSL_CTX_check_private_key() failed");
+
 			goto error;
 		}
 
@@ -423,6 +452,7 @@ namespace RTC
 		if (ret == 0)
 		{
 			LOG_OPENSSL_ERROR("SSL_CTX_set_cipher_list() failed");
+
 			goto error;
 		}
 
@@ -443,12 +473,14 @@ namespace RTC
 		if (!ecdh)
 		{
 			LOG_OPENSSL_ERROR("EC_KEY_new_by_curve_name() failed");
+
 			goto error;
 		}
 
 		if (SSL_CTX_set_tmp_ecdh(DtlsTransport::sslCtx, ecdh) != 1)
 		{
 			LOG_OPENSSL_ERROR("SSL_CTX_set_tmp_ecdh() failed");
+
 			goto error;
 		}
 
@@ -466,7 +498,7 @@ namespace RTC
 			dtlsSrtpProfiles += profileEntry->name;
 		}
 
-		MS_DEBUG_TAG(dtls, "setting SRTP profiles for DTLS: %s", dtlsSrtpProfiles.c_str());
+		MS_DEBUG_2TAGS(dtls, srtp, "setting SRTP profiles for DTLS: %s", dtlsSrtpProfiles.c_str());
 
 		// NOTE: This function returns 0 on success.
 		ret = SSL_CTX_set_tlsext_use_srtp(DtlsTransport::sslCtx, dtlsSrtpProfiles.c_str());
@@ -475,6 +507,7 @@ namespace RTC
 		{
 			MS_ERROR("SSL_CTX_set_tlsext_use_srtp() failed when entering '%s'", dtlsSrtpProfiles.c_str());
 			LOG_OPENSSL_ERROR("SSL_CTX_set_tlsext_use_srtp() failed");
+
 			goto error;
 		}
 
@@ -482,13 +515,13 @@ namespace RTC
 
 	error:
 
-		if (DtlsTransport::sslCtx != nullptr)
+		if (DtlsTransport::sslCtx)
 		{
 			SSL_CTX_free(DtlsTransport::sslCtx);
 			DtlsTransport::sslCtx = nullptr;
 		}
 
-		if (ecdh != nullptr)
+		if (ecdh)
 			EC_KEY_free(ecdh);
 
 		MS_THROW_ERROR("SSL context creation failed");
@@ -571,9 +604,10 @@ namespace RTC
 
 		this->ssl = SSL_new(DtlsTransport::sslCtx);
 
-		if (this->ssl == nullptr)
+		if (!this->ssl)
 		{
 			LOG_OPENSSL_ERROR("SSL_new() failed");
+
 			goto error;
 		}
 
@@ -582,20 +616,24 @@ namespace RTC
 
 		this->sslBioFromNetwork = BIO_new(BIO_s_mem());
 
-		if (this->sslBioFromNetwork == nullptr)
+		if (!this->sslBioFromNetwork)
 		{
 			LOG_OPENSSL_ERROR("BIO_new() failed");
+
 			SSL_free(this->ssl);
+
 			goto error;
 		}
 
 		this->sslBioToNetwork = BIO_new(BIO_s_mem());
 
-		if (this->sslBioToNetwork == nullptr)
+		if (!this->sslBioToNetwork)
 		{
 			LOG_OPENSSL_ERROR("BIO_new() failed");
+
 			BIO_free(this->sslBioFromNetwork);
 			SSL_free(this->ssl);
+
 			goto error;
 		}
 
@@ -617,13 +655,13 @@ namespace RTC
 
 		// NOTE: At this point SSL_set_bio() was not called so we must free BIOs as
 		// well.
-		if (this->sslBioFromNetwork != nullptr)
+		if (this->sslBioFromNetwork)
 			BIO_free(this->sslBioFromNetwork);
 
-		if (this->sslBioToNetwork != nullptr)
+		if (this->sslBioToNetwork)
 			BIO_free(this->sslBioToNetwork);
 
-		if (this->ssl != nullptr)
+		if (this->ssl)
 			SSL_free(this->ssl);
 
 		// NOTE: If this is not catched by the caller the program will abort, but
@@ -642,7 +680,7 @@ namespace RTC
 			SendPendingOutgoingDtlsData();
 		}
 
-		if (this->ssl != nullptr)
+		if (this->ssl)
 		{
 			SSL_free(this->ssl);
 
@@ -659,14 +697,44 @@ namespace RTC
 	{
 		MS_TRACE();
 
+		std::string state{ "new" };
+		std::string role{ "none " };
+
+		switch (this->state)
+		{
+			case DtlsState::CONNECTING:
+				state = "connecting";
+				break;
+			case DtlsState::CONNECTED:
+				state = "connected";
+				break;
+			case DtlsState::FAILED:
+				state = "failed";
+				break;
+			case DtlsState::CLOSED:
+				state = "closed";
+				break;
+			default:;
+		}
+
+		switch (this->localRole)
+		{
+			case Role::AUTO:
+				role = "auto";
+				break;
+			case Role::SERVER:
+				role = "server";
+				break;
+			case Role::CLIENT:
+				role = "client";
+				break;
+			default:;
+		}
+
 		MS_DUMP("<DtlsTransport>");
-		MS_DUMP(
-		  "  [role:%s, running:%s, handshake done:%s, connected:%s]",
-		  (this->localRole == Role::SERVER ? "server"
-		                                   : (this->localRole == Role::CLIENT ? "client" : "none")),
-		  IsRunning() ? "yes" : "no",
-		  this->handshakeDone ? "yes" : "no",
-		  this->state == DtlsState::CONNECTED ? "yes" : "no");
+		MS_DUMP("  state           : %s", state.c_str());
+		MS_DUMP("  role            : %s", role.c_str());
+		MS_DUMP("  handshake done: : %s", this->handshakeDone ? "yes" : "no");
 		MS_DUMP("</DtlsTransport>");
 	}
 
@@ -700,7 +768,7 @@ namespace RTC
 
 		// Set state and notify the listener.
 		this->state = DtlsState::CONNECTING;
-		this->listener->OnDtlsConnecting(this);
+		this->listener->OnDtlsTransportConnecting(this);
 
 		switch (this->localRole)
 		{
@@ -769,7 +837,8 @@ namespace RTC
 		}
 
 		// Write the received DTLS data into the sslBioFromNetwork.
-		written = BIO_write(this->sslBioFromNetwork, (const void*)data, static_cast<int>(len));
+		written =
+		  BIO_write(this->sslBioFromNetwork, static_cast<const void*>(data), static_cast<int>(len));
 
 		if (written != static_cast<int>(len))
 		{
@@ -781,7 +850,7 @@ namespace RTC
 		}
 
 		// Must call SSL_read() to process received DTLS data.
-		read = SSL_read(this->ssl, (void*)DtlsTransport::sslReadBuffer, SslReadBufferSize);
+		read = SSL_read(this->ssl, static_cast<void*>(DtlsTransport::sslReadBuffer), SslReadBufferSize);
 
 		// Send data if it's ready.
 		SendPendingOutgoingDtlsData();
@@ -806,7 +875,7 @@ namespace RTC
 			}
 
 			// Notify the listener.
-			this->listener->OnDtlsApplicationData(
+			this->listener->OnDtlsTransportApplicationDataReceived(
 			  this, (uint8_t*)DtlsTransport::sslReadBuffer, static_cast<size_t>(read));
 		}
 	}
@@ -832,7 +901,7 @@ namespace RTC
 
 		int written;
 
-		written = SSL_write(this->ssl, (const void*)data, static_cast<int>(len));
+		written = SSL_write(this->ssl, static_cast<const void*>(data), static_cast<int>(len));
 
 		if (written < 0)
 		{
@@ -865,8 +934,8 @@ namespace RTC
 		// Stop the DTLS timer.
 		this->timer->Stop();
 
-		// We need to reset the SSL instance so we need to "shutdown" it, but we don't
-		// want to send a Close Alert to the peer, so just don't call to
+		// We need to reset the SSL instance so we need to "shutdown" it, but we
+		// don't want to send a Close Alert to the peer, so just don't call
 		// SendPendingOutgoingDTLSData().
 		SSL_shutdown(this->ssl);
 
@@ -959,7 +1028,7 @@ namespace RTC
 
 				// Set state and notify the listener.
 				this->state = DtlsState::CLOSED;
-				this->listener->OnDtlsClosed(this);
+				this->listener->OnDtlsTransportClosed(this);
 			}
 			else
 			{
@@ -969,7 +1038,7 @@ namespace RTC
 
 				// Set state and notify the listener.
 				this->state = DtlsState::FAILED;
-				this->listener->OnDtlsFailed(this);
+				this->listener->OnDtlsTransportFailed(this);
 			}
 
 			return false;
@@ -998,7 +1067,7 @@ namespace RTC
 		MS_DEBUG_DEV("%" PRIu64 " bytes of DTLS data ready to sent to the peer", read);
 
 		// Notify the listener.
-		this->listener->OnOutgoingDtlsData(
+		this->listener->OnDtlsTransportSendData(
 		  this, reinterpret_cast<uint8_t*>(data), static_cast<size_t>(read));
 
 		// Clear the BIO buffer.
@@ -1020,7 +1089,7 @@ namespace RTC
 
 		// NOTE: If ret == 0 then ignore the value in dtlsTimeout.
 		// NOTE: No DTLSv_1_2_get_timeout() or DTLS_get_timeout() in OpenSSL 1.1.0-dev.
-		ret = DTLSv1_get_timeout(this->ssl, (void*)&dtlsTimeout); // NOLINT
+		ret = DTLSv1_get_timeout(this->ssl, static_cast<void*>(&dtlsTimeout)); // NOLINT
 
 		if (ret == 0)
 			return true;
@@ -1040,16 +1109,18 @@ namespace RTC
 			return true;
 		}
 		// NOTE: Don't start the timer again if the timeout is greater than 30 seconds.
+		else
+		{
+			MS_WARN_TAG(dtls, "DTLS timeout too high (%" PRIu64 "ms), resetting DLTS", timeoutMs);
 
-		MS_WARN_TAG(dtls, "DTLS timeout too high (%" PRIu64 "ms), resetting DLTS", timeoutMs);
+			Reset();
 
-		Reset();
+			// Set state and notify the listener.
+			this->state = DtlsState::FAILED;
+			this->listener->OnDtlsTransportFailed(this);
 
-		// Set state and notify the listener.
-		this->state = DtlsState::FAILED;
-		this->listener->OnDtlsFailed(this);
-
-		return false;
+			return false;
+		}
 	}
 
 	inline bool DtlsTransport::ProcessHandshake()
@@ -1067,7 +1138,7 @@ namespace RTC
 
 			// Set state and notify the listener.
 			this->state = DtlsState::FAILED;
-			this->listener->OnDtlsFailed(this);
+			this->listener->OnDtlsTransportFailed(this);
 
 			return false;
 		}
@@ -1085,13 +1156,13 @@ namespace RTC
 
 		// NOTE: We assume that "use_srtp" DTLS extension is required even if
 		// there is no audio/video.
-		MS_WARN_TAG(dtls, "SRTP profile not negotiated");
+		MS_WARN_2TAGS(dtls, srtp, "SRTP profile not negotiated");
 
 		Reset();
 
 		// Set state and notify the listener.
 		this->state = DtlsState::FAILED;
-		this->listener->OnDtlsFailed(this);
+		this->listener->OnDtlsTransportFailed(this);
 
 		return false;
 	}
@@ -1112,7 +1183,7 @@ namespace RTC
 
 		certificate = SSL_get_peer_certificate(this->ssl);
 
-		if (certificate == nullptr)
+		if (!certificate)
 		{
 			MS_WARN_TAG(dtls, "no certificate was provided by the peer");
 
@@ -1204,7 +1275,7 @@ namespace RTC
 
 		BIO_get_mem_ptr(bio, &mem); // NOLINT[cppcoreguidelines-pro-type-cstyle-cast]
 
-		if ((mem == nullptr) || (mem->data == nullptr) || (mem->length == 0u))
+		if (!mem || !mem->data || mem->length == 0u)
 		{
 			LOG_OPENSSL_ERROR("BIO_get_mem_ptr() failed");
 
@@ -1226,17 +1297,57 @@ namespace RTC
 	{
 		MS_TRACE();
 
-		uint8_t srtpMaterial[SrtpMasterLength * 2];
-		uint8_t* srtpLocalKey;
-		uint8_t* srtpLocalSalt;
-		uint8_t* srtpRemoteKey;
-		uint8_t* srtpRemoteSalt;
-		uint8_t srtpLocalMasterKey[SrtpMasterLength];
-		uint8_t srtpRemoteMasterKey[SrtpMasterLength];
+		size_t srtpKeyLength{ 0 };
+		size_t srtpSaltLength{ 0 };
+		size_t srtpMasterLength{ 0 };
+
+		switch (srtpProfile)
+		{
+			case RTC::SrtpSession::Profile::AES_CM_128_HMAC_SHA1_80:
+			case RTC::SrtpSession::Profile::AES_CM_128_HMAC_SHA1_32:
+			{
+				srtpKeyLength    = SrtpMasterKeyLength;
+				srtpSaltLength   = SrtpMasterSaltLength;
+				srtpMasterLength = SrtpMasterLength;
+
+				break;
+			}
+
+			case RTC::SrtpSession::Profile::AEAD_AES_256_GCM:
+			{
+				srtpKeyLength    = SrtpAesGcm256MasterKeyLength;
+				srtpSaltLength   = SrtpAesGcm256MasterSaltLength;
+				srtpMasterLength = SrtpAesGcm256MasterLength;
+
+				break;
+			}
+
+			case RTC::SrtpSession::Profile::AEAD_AES_128_GCM:
+			{
+				srtpKeyLength    = SrtpAesGcm128MasterKeyLength;
+				srtpSaltLength   = SrtpAesGcm128MasterSaltLength;
+				srtpMasterLength = SrtpAesGcm128MasterLength;
+
+				break;
+			}
+
+			default:
+			{
+				MS_ABORT("unknown SRTP profile");
+			}
+		}
+
+		auto* srtpMaterial = new uint8_t[srtpMasterLength * 2];
+		uint8_t* srtpLocalKey{ nullptr };
+		uint8_t* srtpLocalSalt{ nullptr };
+		uint8_t* srtpRemoteKey{ nullptr };
+		uint8_t* srtpRemoteSalt{ nullptr };
+		auto* srtpLocalMasterKey  = new uint8_t[srtpMasterLength];
+		auto* srtpRemoteMasterKey = new uint8_t[srtpMasterLength];
 		int ret;
 
 		ret = SSL_export_keying_material(
-		  this->ssl, srtpMaterial, SrtpMasterLength * 2, "EXTRACTOR-dtls_srtp", 19, nullptr, 0, 0);
+		  this->ssl, srtpMaterial, srtpMasterLength * 2, "EXTRACTOR-dtls_srtp", 19, nullptr, 0, 0);
 
 		MS_ASSERT(ret != 0, "SSL_export_keying_material() failed");
 
@@ -1245,9 +1356,9 @@ namespace RTC
 			case Role::SERVER:
 			{
 				srtpRemoteKey  = srtpMaterial;
-				srtpLocalKey   = srtpRemoteKey + SrtpMasterKeyLength;
-				srtpRemoteSalt = srtpLocalKey + SrtpMasterKeyLength;
-				srtpLocalSalt  = srtpRemoteSalt + SrtpMasterSaltLength;
+				srtpLocalKey   = srtpRemoteKey + srtpKeyLength;
+				srtpRemoteSalt = srtpLocalKey + srtpKeyLength;
+				srtpLocalSalt  = srtpRemoteSalt + srtpSaltLength;
 
 				break;
 			}
@@ -1255,9 +1366,9 @@ namespace RTC
 			case Role::CLIENT:
 			{
 				srtpLocalKey   = srtpMaterial;
-				srtpRemoteKey  = srtpLocalKey + SrtpMasterKeyLength;
-				srtpLocalSalt  = srtpRemoteKey + SrtpMasterKeyLength;
-				srtpRemoteSalt = srtpLocalSalt + SrtpMasterSaltLength;
+				srtpRemoteKey  = srtpLocalKey + srtpKeyLength;
+				srtpLocalSalt  = srtpRemoteKey + srtpKeyLength;
+				srtpRemoteSalt = srtpLocalSalt + srtpSaltLength;
 
 				break;
 			}
@@ -1269,22 +1380,26 @@ namespace RTC
 		}
 
 		// Create the SRTP local master key.
-		std::memcpy(srtpLocalMasterKey, srtpLocalKey, SrtpMasterKeyLength);
-		std::memcpy(srtpLocalMasterKey + SrtpMasterKeyLength, srtpLocalSalt, SrtpMasterSaltLength);
+		std::memcpy(srtpLocalMasterKey, srtpLocalKey, srtpKeyLength);
+		std::memcpy(srtpLocalMasterKey + srtpKeyLength, srtpLocalSalt, srtpSaltLength);
 		// Create the SRTP remote master key.
-		std::memcpy(srtpRemoteMasterKey, srtpRemoteKey, SrtpMasterKeyLength);
-		std::memcpy(srtpRemoteMasterKey + SrtpMasterKeyLength, srtpRemoteSalt, SrtpMasterSaltLength);
+		std::memcpy(srtpRemoteMasterKey, srtpRemoteKey, srtpKeyLength);
+		std::memcpy(srtpRemoteMasterKey + srtpKeyLength, srtpRemoteSalt, srtpSaltLength);
 
 		// Set state and notify the listener.
 		this->state = DtlsState::CONNECTED;
-		this->listener->OnDtlsConnected(
+		this->listener->OnDtlsTransportConnected(
 		  this,
 		  srtpProfile,
 		  srtpLocalMasterKey,
-		  SrtpMasterLength,
+		  srtpMasterLength,
 		  srtpRemoteMasterKey,
-		  SrtpMasterLength,
+		  srtpMasterLength,
 		  this->remoteCert);
+
+		delete[] srtpMaterial;
+		delete[] srtpLocalMasterKey;
+		delete[] srtpRemoteMasterKey;
 	}
 
 	inline RTC::SrtpSession::Profile DtlsTransport::GetNegotiatedSrtpProfile()
@@ -1296,7 +1411,7 @@ namespace RTC
 		// Ensure that the SRTP profile has been negotiated.
 		SRTP_PROTECTION_PROFILE* sslSrtpProfile = SSL_get_selected_srtp_profile(this->ssl);
 
-		if (sslSrtpProfile == nullptr)
+		if (!sslSrtpProfile)
 			return negotiatedSrtpProfile;
 
 		// Get the negotiated SRTP profile.
@@ -1306,7 +1421,7 @@ namespace RTC
 
 			if (std::strcmp(sslSrtpProfile->name, profileEntry->name) == 0)
 			{
-				MS_DEBUG_TAG(dtls, "chosen SRTP profile: %s", profileEntry->name);
+				MS_DEBUG_2TAGS(dtls, srtp, "chosen SRTP profile: %s", profileEntry->name);
 
 				negotiatedSrtpProfile = profileEntry->profile;
 			}

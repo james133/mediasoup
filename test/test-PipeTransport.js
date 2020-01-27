@@ -12,6 +12,8 @@ let audioProducer;
 let videoProducer;
 let transport2;
 let videoConsumer;
+let dataProducer;
+let dataConsumer;
 
 const mediaCodecs =
 [
@@ -119,22 +121,34 @@ const videoProducerParameters =
 	appData : { foo: 'bar2' }
 };
 
+const dataProducerParameters =
+{
+	sctpStreamParameters :
+	{
+		streamId          : 666,
+		ordered           : false,
+		maxPacketLifeTime : 5000
+	},
+	label    : 'foo',
+	protocol : 'bar'
+};
+
 const consumerDeviceCapabilities =
 {
 	codecs :
 	[
 		{
-			mimeType             : 'audio/opus',
 			kind                 : 'audio',
-			clockRate            : 48000,
+			mimeType             : 'audio/opus',
 			preferredPayloadType : 100,
+			clockRate            : 48000,
 			channels             : 2
 		},
 		{
-			mimeType             : 'video/VP8',
 			kind                 : 'video',
-			clockRate            : 90000,
+			mimeType             : 'video/VP8',
 			preferredPayloadType : 101,
+			clockRate            : 90000,
 			rtcpFeedback         :
 			[
 				{ type: 'nack' },
@@ -144,15 +158,15 @@ const consumerDeviceCapabilities =
 			]
 		},
 		{
-			mimeType             : 'video/rtx',
 			kind                 : 'video',
-			clockRate            : 90000,
+			mimeType             : 'video/rtx',
 			preferredPayloadType : 102,
-			rtcpFeedback         : [],
+			clockRate            : 90000,
 			parameters           :
 			{
 				apt : 101
-			}
+			},
+			rtcpFeedback : []
 		}
 	],
 	headerExtensions :
@@ -176,7 +190,11 @@ const consumerDeviceCapabilities =
 			preferredId      : 10,
 			preferredEncrypt : false
 		}
-	]
+	],
+	sctpCapabilities :
+	{
+		numSctpStreams : 2048
+	}
 };
 
 beforeAll(async () =>
@@ -186,14 +204,17 @@ beforeAll(async () =>
 	router2 = await worker.createRouter({ mediaCodecs });
 	transport1 = await router1.createWebRtcTransport(
 		{
-			listenIps : [ '127.0.0.1' ]
+			listenIps  : [ '127.0.0.1' ],
+			enableSctp : true
 		});
 	transport2 = await router2.createWebRtcTransport(
 		{
-			listenIps : [ '127.0.0.1' ]
+			listenIps  : [ '127.0.0.1' ],
+			enableSctp : true
 		});
 	audioProducer = await transport1.produce(audioProducerParameters);
 	videoProducer = await transport1.produce(videoProducerParameters);
+	dataProducer = await transport1.produceData(dataProducerParameters);
 
 	// Pause the videoProducer.
 	await videoProducer.pause();
@@ -213,14 +234,14 @@ test('router.pipeToRouter() succeeds with audio', async () =>
 
 	dump = await router1.dump();
 
-	// There shoud should be two Transports in router1:
+	// There shoud be two Transports in router1:
 	// - WebRtcTransport for audioProducer and videoProducer.
 	// - PipeTransport between router1 and router2.
 	expect(dump.transportIds.length).toBe(2);
 
 	dump = await router2.dump();
 
-	// There shoud should be two Transports in router2:
+	// There shoud be two Transports in router2:
 	// - WebRtcTransport for audioConsumer and videoConsumer.
 	// - pipeTransport between router2 and router1.
 	expect(dump.transportIds.length).toBe(2);
@@ -249,8 +270,10 @@ test('router.pipeToRouter() succeeds with audio', async () =>
 	expect(pipeConsumer.rtpParameters.headerExtensions).toEqual(
 		[
 			{
-				uri : 'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
-				id  : 10
+				uri        : 'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
+				id         : 10,
+				encrypt    : false,
+				parameters : {}
 			}
 		]);
 	expect(pipeConsumer.rtpParameters.encodings).toEqual(
@@ -260,7 +283,7 @@ test('router.pipeToRouter() succeeds with audio', async () =>
 	expect(pipeConsumer.type).toBe('pipe');
 	expect(pipeConsumer.paused).toBe(false);
 	expect(pipeConsumer.producerPaused).toBe(false);
-	expect(pipeConsumer.score).toBe(undefined);
+	expect(pipeConsumer.score).toEqual({ score: 10, producerScore: 10 });
 	expect(pipeConsumer.appData).toEqual({});
 
 	expect(pipeProducer.id).toBe(audioProducer.id);
@@ -272,8 +295,8 @@ test('router.pipeToRouter() succeeds with audio', async () =>
 		[
 			{
 				mimeType    : 'audio/opus',
-				clockRate   : 48000,
 				payloadType : 100,
+				clockRate   : 48000,
 				channels    : 2,
 				parameters  :
 				{
@@ -286,8 +309,10 @@ test('router.pipeToRouter() succeeds with audio', async () =>
 	expect(pipeProducer.rtpParameters.headerExtensions).toEqual(
 		[
 			{
-				uri : 'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
-				id  : 10
+				uri        : 'urn:ietf:params:rtp-hdrext:ssrc-audio-level',
+				id         : 10,
+				encrypt    : false,
+				parameters : {}
 			}
 		]);
 	expect(pipeProducer.rtpParameters.encodings).toEqual(
@@ -326,8 +351,10 @@ test('router.pipeToRouter() succeeds with video', async () =>
 		[
 			{
 				mimeType     : 'video/VP8',
-				clockRate    : 90000,
 				payloadType  : 101,
+				clockRate    : 90000,
+				channels     : 1,
+				parameters   : {},
 				rtcpFeedback :
 				[
 					{ type: 'nack', parameter: 'pli' },
@@ -339,20 +366,28 @@ test('router.pipeToRouter() succeeds with video', async () =>
 		[
 			// NOTE: Remove this once framemarking draft becomes RFC.
 			{
-				uri : 'http://tools.ietf.org/html/draft-ietf-avtext-framemarking-07',
-				id  : 6
+				uri        : 'http://tools.ietf.org/html/draft-ietf-avtext-framemarking-07',
+				id         : 6,
+				encrypt    : false,
+				parameters : {}
 			},
 			{
-				uri : 'urn:ietf:params:rtp-hdrext:framemarking',
-				id  : 7
+				uri        : 'urn:ietf:params:rtp-hdrext:framemarking',
+				id         : 7,
+				encrypt    : false,
+				parameters : {}
 			},
 			{
-				uri : 'urn:3gpp:video-orientation',
-				id  : 11
+				uri        : 'urn:3gpp:video-orientation',
+				id         : 11,
+				encrypt    : false,
+				parameters : {}
 			},
 			{
-				uri : 'urn:ietf:params:rtp-hdrext:toffset',
-				id  : 12
+				uri        : 'urn:ietf:params:rtp-hdrext:toffset',
+				id         : 12,
+				encrypt    : false,
+				parameters : {}
 			}
 		]);
 	expect(pipeConsumer.rtpParameters.encodings).toEqual(
@@ -365,7 +400,7 @@ test('router.pipeToRouter() succeeds with video', async () =>
 	expect(pipeConsumer.type).toBe('pipe');
 	expect(pipeConsumer.paused).toBe(false);
 	expect(pipeConsumer.producerPaused).toBe(true);
-	expect(pipeConsumer.score).toBe(undefined);
+	expect(pipeConsumer.score).toEqual({ score: 10, producerScore: 10 });
 	expect(pipeConsumer.appData).toEqual({});
 
 	expect(pipeProducer.id).toBe(videoProducer.id);
@@ -377,8 +412,10 @@ test('router.pipeToRouter() succeeds with video', async () =>
 		[
 			{
 				mimeType     : 'video/VP8',
-				clockRate    : 90000,
 				payloadType  : 101,
+				clockRate    : 90000,
+				channels     : 1,
+				parameters   : {},
 				rtcpFeedback :
 				[
 					{ type: 'nack', parameter: 'pli' },
@@ -390,20 +427,28 @@ test('router.pipeToRouter() succeeds with video', async () =>
 		[
 			// NOTE: Remove this once framemarking draft becomes RFC.
 			{
-				uri : 'http://tools.ietf.org/html/draft-ietf-avtext-framemarking-07',
-				id  : 6
+				uri        : 'http://tools.ietf.org/html/draft-ietf-avtext-framemarking-07',
+				id         : 6,
+				encrypt    : false,
+				parameters : {}
 			},
 			{
-				uri : 'urn:ietf:params:rtp-hdrext:framemarking',
-				id  : 7
+				uri        : 'urn:ietf:params:rtp-hdrext:framemarking',
+				id         : 7,
+				encrypt    : false,
+				parameters : {}
 			},
 			{
-				uri : 'urn:3gpp:video-orientation',
-				id  : 11
+				uri        : 'urn:3gpp:video-orientation',
+				id         : 11,
+				encrypt    : false,
+				parameters : {}
 			},
 			{
-				uri : 'urn:ietf:params:rtp-hdrext:toffset',
-				id  : 12
+				uri        : 'urn:ietf:params:rtp-hdrext:toffset',
+				id         : 12,
+				encrypt    : false,
+				parameters : {}
 			}
 		]);
 	expect(pipeProducer.paused).toBe(true);
@@ -426,31 +471,43 @@ test('transport.consume() for a pipe Producer succeeds', async () =>
 		[
 			{
 				mimeType     : 'video/VP8',
-				clockRate    : 90000,
 				payloadType  : 101,
+				clockRate    : 90000,
+				channels     : 1,
+				parameters   : {},
 				rtcpFeedback :
 				[
-					{ type: 'nack' },
+					{ type: 'nack', parameter: '' },
 					{ type: 'ccm', parameter: 'fir' },
-					{ type: 'google-remb' }
+					{ type: 'google-remb', parameter: '' },
+					{ type: 'transport-cc', parameter: '' }
 				]
 			},
 			{
-				mimeType     : 'video/rtx',
-				clockRate    : 90000,
-				payloadType  : 102,
-				rtcpFeedback : [],
-				parameters   :
+				mimeType    : 'video/rtx',
+				payloadType : 102,
+				clockRate   : 90000,
+				channels    : 1,
+				parameters  :
 				{
 					apt : 101
-				}
+				},
+				rtcpFeedback : []
 			}
 		]);
 	expect(videoConsumer.rtpParameters.headerExtensions).toEqual(
 		[
 			{
-				uri : 'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time',
-				id  : 4
+				uri        : 'http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time',
+				id         : 4,
+				encrypt    : false,
+				parameters : {}
+			},
+			{
+				uri        : 'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01',
+				id         : 5,
+				encrypt    : false,
+				parameters : {}
 			}
 		]);
 	expect(videoConsumer.rtpParameters.encodings.length).toBe(1);
@@ -466,22 +523,26 @@ test('transport.consume() for a pipe Producer succeeds', async () =>
 
 test('producer.pause() and producer.resume() are transmitted to pipe Consumer', async () =>
 {
+	// NOTE: Let's use a Promise since otherwise there may be race conditions
+	// between events and await lines below.
+	let promise;
+
 	expect(videoProducer.paused).toBe(true);
 	expect(videoConsumer.producerPaused).toBe(true);
 	expect(videoConsumer.paused).toBe(false);
 
-	await videoProducer.resume();
+	promise = new Promise((resolve) => videoConsumer.once('producerresume', resolve));
 
-	if (videoConsumer.producerPaused)
-		await new Promise((resolve) => videoConsumer.once('producerresume', resolve));
+	await videoProducer.resume();
+	await promise;
 
 	expect(videoConsumer.producerPaused).toBe(false);
 	expect(videoConsumer.paused).toBe(false);
 
-	await videoProducer.pause();
+	promise = new Promise((resolve) => videoConsumer.once('producerpause', resolve));
 
-	if (!videoConsumer.producerPaused)
-		await new Promise((resolve) => videoConsumer.once('producerpause', resolve));
+	await videoProducer.pause();
+	await promise;
 
 	expect(videoConsumer.producerPaused).toBe(true);
 	expect(videoConsumer.paused).toBe(false);
@@ -497,4 +558,117 @@ test('producer.close() is transmitted to pipe Consumer', async () =>
 		await new Promise((resolve) => videoConsumer.once('producerclose', resolve));
 
 	expect(videoConsumer.closed).toBe(true);
+}, 2000);
+
+test('router.pipeToRouter() succeeds with data', async () =>
+{
+	let dump;
+
+	const { pipeDataConsumer, pipeDataProducer } = await router1.pipeToRouter(
+		{
+			dataProducerId : dataProducer.id,
+			router         : router2
+		});
+
+	dump = await router1.dump();
+
+	// There shoud be two Transports in router1:
+	// - WebRtcTransport for audioProducer, videoProducer and dataProducer.
+	// - PipeTransport between router1 and router2.
+	expect(dump.transportIds.length).toBe(2);
+
+	dump = await router2.dump();
+
+	// There shoud be two Transports in router2:
+	// - WebRtcTransport for audioConsumer, videoConsumer and dataConsumer.
+	// - pipeTransport between router2 and router1.
+	expect(dump.transportIds.length).toBe(2);
+
+	expect(pipeDataConsumer.id).toBeType('string');
+	expect(pipeDataConsumer.closed).toBe(false);
+	expect(pipeDataConsumer.sctpStreamParameters).toBeType('object');
+	expect(pipeDataConsumer.sctpStreamParameters.streamId).toBeType('number');
+	expect(pipeDataConsumer.sctpStreamParameters.ordered).toBe(false);
+	expect(pipeDataConsumer.sctpStreamParameters.maxPacketLifeTime).toBe(5000);
+	expect(pipeDataConsumer.sctpStreamParameters.maxRetransmits).toBe(undefined);
+	expect(pipeDataConsumer.label).toBe('foo');
+	expect(pipeDataConsumer.protocol).toBe('bar');
+
+	expect(pipeDataProducer.id).toBe(dataProducer.id);
+	expect(pipeDataProducer.closed).toBe(false);
+	expect(pipeDataProducer.sctpStreamParameters).toBeType('object');
+	expect(pipeDataProducer.sctpStreamParameters.streamId).toBeType('number');
+	expect(pipeDataProducer.sctpStreamParameters.ordered).toBe(false);
+	expect(pipeDataProducer.sctpStreamParameters.maxPacketLifeTime).toBe(5000);
+	expect(pipeDataProducer.sctpStreamParameters.maxRetransmits).toBe(undefined);
+	expect(pipeDataProducer.label).toBe('foo');
+	expect(pipeDataProducer.protocol).toBe('bar');
+}, 2000);
+
+test('transport.dataConsume() for a pipe DataProducer succeeds', async () =>
+{
+	dataConsumer = await transport2.consumeData(
+		{
+			dataProducerId : dataProducer.id
+		});
+
+	expect(dataConsumer.id).toBeType('string');
+	expect(dataConsumer.closed).toBe(false);
+	expect(dataConsumer.sctpStreamParameters).toBeType('object');
+	expect(dataConsumer.sctpStreamParameters.streamId).toBeType('number');
+	expect(dataConsumer.sctpStreamParameters.ordered).toBe(false);
+	expect(dataConsumer.sctpStreamParameters.maxPacketLifeTime).toBe(5000);
+	expect(dataConsumer.sctpStreamParameters.maxRetransmits).toBe(undefined);
+	expect(dataConsumer.label).toBe('foo');
+	expect(dataConsumer.protocol).toBe('bar');
+}, 2000);
+
+test('dataProducer.close() is transmitted to pipe DataConsumer', async () =>
+{
+	await dataProducer.close();
+
+	expect(dataProducer.closed).toBe(true);
+
+	if (!dataConsumer.closed)
+		await new Promise((resolve) => dataConsumer.once('dataproducerclose', resolve));
+
+	expect(dataConsumer.closed).toBe(true);
+}, 2000);
+
+test('router.pipeToRouter() called twice generates a single PipeTransport pair', async () =>
+{
+	const routerA = await worker.createRouter({ mediaCodecs });
+	const routerB = await worker.createRouter({ mediaCodecs });
+	const transportA1 = await routerA.createWebRtcTransport({ listenIps: [ '127.0.0.1' ] });
+	const transportA2 = await routerA.createWebRtcTransport({ listenIps: [ '127.0.0.1' ] });
+	const audioProducer1 = await transportA1.produce(audioProducerParameters);
+	const audioProducer2 = await transportA2.produce(audioProducerParameters);
+	let dump;
+
+	await Promise.all(
+		[
+			routerA.pipeToRouter(
+				{
+					producerId : audioProducer1.id,
+					router     : routerB
+				}),
+			routerA.pipeToRouter(
+				{
+					producerId : audioProducer2.id,
+					router     : routerB
+				})
+		]);
+
+	dump = await routerA.dump();
+
+	// There shoud be 3 Transports in routerA:
+	// - WebRtcTransport for audioProducer1 and audioProducer2.
+	// - PipeTransport between routerA and routerB.
+	expect(dump.transportIds.length).toBe(3);
+
+	dump = await routerB.dump();
+
+	// There shoud be 1 Transport in routerB:
+	// - PipeTransport between routerA and routerB.
+	expect(dump.transportIds.length).toBe(1);
 }, 2000);

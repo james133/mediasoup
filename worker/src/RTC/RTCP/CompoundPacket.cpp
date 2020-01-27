@@ -1,5 +1,5 @@
 #define MS_CLASS "RTC::RTCP::CompoundPacket"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/RTCP/CompoundPacket.hpp"
 #include "Logger.hpp"
@@ -35,6 +35,9 @@ namespace RTC
 
 			if (this->sdesPacket.GetCount() != 0u)
 				this->size += this->sdesPacket.GetSize();
+
+			if (this->xrPacket.Begin() != this->xrPacket.End())
+				this->size += this->xrPacket.GetSize();
 
 			// Fill it.
 			size_t offset{ 0 };
@@ -80,7 +83,10 @@ namespace RTC
 			}
 
 			if (this->sdesPacket.GetCount() != 0u)
-				this->sdesPacket.Serialize(this->header + offset);
+				offset += this->sdesPacket.Serialize(this->header + offset);
+
+			if (this->xrPacket.Begin() != this->xrPacket.End())
+				this->xrPacket.Serialize(this->header + offset);
 		}
 
 		void CompoundPacket::Dump()
@@ -103,6 +109,9 @@ namespace RTC
 
 			if (this->sdesPacket.GetCount() != 0u)
 				this->sdesPacket.Dump();
+
+			if (this->xrPacket.Begin() != this->xrPacket.End())
+				this->xrPacket.Dump();
 
 			MS_DUMP("</CompoundPacket>");
 		}

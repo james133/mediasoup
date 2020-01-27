@@ -1,5 +1,5 @@
 #define MS_CLASS "RTC::TcpConnection"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/TcpConnection.hpp"
 #include "Logger.hpp"
@@ -17,6 +17,11 @@ namespace RTC
 
 	TcpConnection::TcpConnection(Listener* listener, size_t bufferSize)
 	  : ::TcpConnection::TcpConnection(bufferSize), listener(listener)
+	{
+		MS_TRACE();
+	}
+
+	TcpConnection::~TcpConnection()
 	{
 		MS_TRACE();
 	}
@@ -71,13 +76,11 @@ namespace RTC
 				// Update received bytes and notify the listener.
 				if (packetLen != 0)
 				{
-					this->recvBytes += packetLen;
-
 					// Copy the received packet into the static buffer so it can be expanded
 					// later.
 					std::memcpy(ReadBuffer, packet, packetLen);
 
-					this->listener->OnPacketRecv(this, ReadBuffer, packetLen);
+					this->listener->OnTcpConnectionPacketReceived(this, ReadBuffer, packetLen);
 				}
 
 				// If there is no more space available in the buffer and that is because
@@ -135,7 +138,10 @@ namespace RTC
 					  "connection");
 
 					// Close the socket.
-					Close();
+					ErrorReceiving();
+
+					// And exit fast since we are supposed to be deallocated.
+					return;
 				}
 			}
 			// The buffer is not full.
@@ -149,18 +155,15 @@ namespace RTC
 		}
 	}
 
-	void TcpConnection::Send(const uint8_t* data, size_t len)
+	void TcpConnection::Send(const uint8_t* data, size_t len, ::TcpConnection::onSendCallback* cb)
 	{
 		MS_TRACE();
-
-		// Update sent bytes.
-		this->sentBytes += len;
 
 		// Write according to Framing RFC 4571.
 
 		uint8_t frameLen[2];
 
 		Utils::Byte::Set2Bytes(frameLen, 0, len);
-		Write(frameLen, 2, data, len);
+		::TcpConnection::Write(frameLen, 2, data, len, cb);
 	}
 } // namespace RTC

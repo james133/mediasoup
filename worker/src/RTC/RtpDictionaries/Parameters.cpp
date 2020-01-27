@@ -1,5 +1,5 @@
 #define MS_CLASS "RTC::Parameters"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/Parameters.hpp"
 #include "Logger.hpp"
@@ -141,6 +141,20 @@ namespace RTC
 		auto& value = it->second;
 
 		return value.type == Value::Type::INTEGER;
+	}
+
+	bool Parameters::HasPositiveInteger(const std::string& key) const
+	{
+		MS_TRACE();
+
+		auto it = this->mapKeyValues.find(key);
+
+		if (it == this->mapKeyValues.end())
+			return false;
+
+		auto& value = it->second;
+
+		return value.type == Value::Type::INTEGER && value.integerValue >= 0;
 	}
 
 	bool Parameters::HasDouble(const std::string& key) const

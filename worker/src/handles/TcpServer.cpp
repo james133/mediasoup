@@ -1,5 +1,5 @@
 #define MS_CLASS "TcpServer"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "handles/TcpServer.hpp"
 #include "Logger.hpp"
@@ -12,10 +12,8 @@ inline static void onConnection(uv_stream_t* handle, int status)
 {
 	auto* server = static_cast<TcpServer*>(handle->data);
 
-	if (server == nullptr)
-		return;
-
-	server->OnUvConnection(status);
+	if (server)
+		server->OnUvConnection(status);
 }
 
 inline static void onClose(uv_handle_t* handle)
@@ -32,7 +30,7 @@ TcpServer::TcpServer(uv_tcp_t* uvHandle, int backlog) : uvHandle(uvHandle)
 
 	int err;
 
-	this->uvHandle->data = (void*)this;
+	this->uvHandle->data = static_cast<void*>(this);
 
 	err = uv_listen(
 	  reinterpret_cast<uv_stream_t*>(this->uvHandle),
@@ -77,11 +75,8 @@ void TcpServer::Close()
 
 	MS_DEBUG_DEV("closing %zu active connections", this->connections.size());
 
-	for (auto it = this->connections.begin(); it != this->connections.end();)
+	for (auto* connection : this->connections)
 	{
-		auto* connection = *it;
-
-		it = this->connections.erase(it);
 		delete connection;
 	}
 
@@ -98,6 +93,48 @@ void TcpServer::Dump() const
 	  (!this->closed) ? "open" : "closed",
 	  this->connections.size());
 	MS_DUMP("</TcpServer>");
+}
+
+void TcpServer::AcceptTcpConnection(TcpConnection* connection)
+{
+	MS_TRACE();
+
+	MS_ASSERT(connection != nullptr, "TcpConnection pointer was not allocated by the user");
+
+	try
+	{
+		connection->Setup(this, &(this->localAddr), this->localIp, this->localPort);
+	}
+	catch (const MediaSoupError& error)
+	{
+		delete connection;
+
+		return;
+	}
+
+	// Accept the connection.
+	int err = uv_accept(
+	  reinterpret_cast<uv_stream_t*>(this->uvHandle),
+	  reinterpret_cast<uv_stream_t*>(connection->GetUvHandle()));
+
+	if (err != 0)
+		MS_ABORT("uv_accept() failed: %s", uv_strerror(err));
+
+	// Start receiving data.
+	try
+	{
+		// NOTE: This may throw.
+		connection->Start();
+	}
+	catch (const MediaSoupError& error)
+	{
+		delete connection;
+
+		return;
+	}
+
+	// Store it.
+	this->connections.insert(connection);
 }
 
 bool TcpServer::SetLocalAddress()
@@ -132,8 +169,6 @@ inline void TcpServer::OnUvConnection(int status)
 	if (this->closed)
 		return;
 
-	int err;
-
 	if (status != 0)
 	{
 		MS_ERROR("error while receiving a new TCP connection: %s", uv_strerror(status));
@@ -141,63 +176,22 @@ inline void TcpServer::OnUvConnection(int status)
 		return;
 	}
 
-	// Notify the subclass so it provides an allocated derived class of TCPConnection.
-	TcpConnection* connection = nullptr;
-	UserOnTcpConnectionAlloc(&connection);
-
-	MS_ASSERT(connection != nullptr, "TcpConnection pointer was not allocated by the user");
-
-	try
-	{
-		connection->Setup(this, &(this->localAddr), this->localIp, this->localPort);
-	}
-	catch (const MediaSoupError& error)
-	{
-		delete connection;
-
-		return;
-	}
-
-	// Accept the connection.
-	err = uv_accept(
-	  reinterpret_cast<uv_stream_t*>(this->uvHandle),
-	  reinterpret_cast<uv_stream_t*>(connection->GetUvHandle()));
-
-	if (err != 0)
-		MS_ABORT("uv_accept() failed: %s", uv_strerror(err));
-
-	// Insert the TcpConnection in the set.
-	this->connections.insert(connection);
-
-	// Start receiving data.
-	try
-	{
-		connection->Start();
-
-		// Notify the subclass.
-		UserOnNewTcpConnection(connection);
-	}
-	catch (const MediaSoupError& error)
-	{
-		MS_ERROR("cannot start the TCP connection, closing the connection: %s", error.what());
-
-		delete connection;
-	}
+	// Notify the subclass about a new TCP connection attempt.
+	UserOnTcpConnectionAlloc();
 }
 
-inline void TcpServer::OnTcpConnectionClosed(TcpConnection* connection, bool isClosedByPeer)
+inline void TcpServer::OnTcpConnectionClosed(TcpConnection* connection)
 {
 	MS_TRACE();
 
 	MS_DEBUG_DEV("TCP connection closed");
 
 	// Remove the TcpConnection from the set.
-	size_t numErased = this->connections.erase(connection);
-
-	// If the closed connection was not present in the set, do nothing else.
-	if (numErased == 0)
-		return;
+	this->connections.erase(connection);
 
 	// Notify the subclass.
-	UserOnTcpConnectionClosed(connection, isClosedByPeer);
+	UserOnTcpConnectionClosed(connection);
+
+	// Delete it.
+	delete connection;
 }

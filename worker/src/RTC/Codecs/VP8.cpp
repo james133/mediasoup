@@ -1,8 +1,9 @@
 #define MS_CLASS "RTC::Codecs::VP8"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/Codecs/VP8.hpp"
 #include "Logger.hpp"
+#include <cstring> // std::memcpy()
 
 namespace RTC
 {

@@ -29,16 +29,16 @@ const mediaCodecs =
 		clockRate : 90000
 	},
 	{
-		kind         : 'video',
-		mimeType     : 'video/H264',
-		clockRate    : 90000,
-		rtcpFeedback : [], // Will be ignored.
-		parameters   :
+		kind       : 'video',
+		mimeType   : 'video/H264',
+		clockRate  : 90000,
+		parameters :
 		{
 			'level-asymmetry-allowed' : 1,
 			'packetization-mode'      : 1,
 			'profile-level-id'        : '4d0032'
-		}
+		},
+		rtcpFeedback : [] // Will be ignored.
 	}
 ];
 
@@ -50,7 +50,7 @@ test('worker.createRouter() succeeds', async () =>
 
 	worker.observer.once('newrouter', onObserverNewRouter);
 
-	const router = await worker.createRouter({ mediaCodecs });
+	const router = await worker.createRouter({ mediaCodecs, appData: { foo: 123 } });
 
 	expect(onObserverNewRouter).toHaveBeenCalledTimes(1);
 	expect(onObserverNewRouter).toHaveBeenCalledWith(router);
@@ -59,7 +59,7 @@ test('worker.createRouter() succeeds', async () =>
 	expect(router.rtpCapabilities).toBeType('object');
 	expect(router.rtpCapabilities.codecs).toBeType('array');
 	expect(router.rtpCapabilities.headerExtensions).toBeType('array');
-	expect(router.rtpCapabilities.fecMechanisms).toEqual([]);
+	expect(router.appData).toEqual({ foo: 123 });
 
 	await expect(worker.dump())
 		.resolves
@@ -69,12 +69,14 @@ test('worker.createRouter() succeeds', async () =>
 		.resolves
 		.toMatchObject(
 			{
-				id                       : router.id,
-				transportIds             : [],
-				rtpObserverIds           : [],
-				mapProducerIdConsumerIds : {},
-				mapConsumerIdProducerId  : {},
-				mapProducerIdObserverIds : {}
+				id                               : router.id,
+				transportIds                     : [],
+				rtpObserverIds                   : [],
+				mapProducerIdConsumerIds         : {},
+				mapConsumerIdProducerId          : {},
+				mapProducerIdObserverIds         : {},
+				mapDataProducerIdDataConsumerIds : {},
+				mapDataConsumerIdDataProducerId  : {}
 			});
 
 	// Private API.
@@ -88,11 +90,15 @@ test('worker.createRouter() succeeds', async () =>
 	expect(worker._routers.size).toBe(0);
 }, 2000);
 
-test('worker.createRouter() without mediaCodecs rejects with TypeError', async () =>
+test('worker.createRouter() with wrong arguments rejects with TypeError', async () =>
 {
 	worker = await createWorker();
 
-	await expect(worker.createRouter())
+	await expect(worker.createRouter({ mediaCodecs: {} }))
+		.rejects
+		.toThrow(TypeError);
+
+	await expect(worker.createRouter({ appData: 'NOT-AN-OBJECT' }))
 		.rejects
 		.toThrow(TypeError);
 

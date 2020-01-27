@@ -1,8 +1,7 @@
 #define MS_CLASS "RTC::PlainRtpTransport"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/PlainRtpTransport.hpp"
-#include "DepLibUV.hpp"
 #include "Logger.hpp"
 #include "MediaSoupErrors.hpp"
 #include "Utils.hpp"
@@ -14,7 +13,7 @@ namespace RTC
 	// NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
 	PlainRtpTransport::PlainRtpTransport(
 	  const std::string& id, RTC::Transport::Listener* listener, json& data)
-	  : RTC::Transport::Transport(id, listener)
+	  : RTC::Transport::Transport(id, listener, data)
 	{
 		MS_TRACE();
 
@@ -97,8 +96,6 @@ namespace RTC
 		}
 		catch (const MediaSoupError& error)
 		{
-			// Must delete everything since the destructor won't be called.
-
 			delete this->udpSocket;
 			this->udpSocket = nullptr;
 
@@ -114,12 +111,16 @@ namespace RTC
 		MS_TRACE();
 
 		delete this->udpSocket;
+		this->udpSocket = nullptr;
 
 		delete this->rtcpUdpSocket;
+		this->rtcpUdpSocket = nullptr;
 
 		delete this->tuple;
+		this->tuple = nullptr;
 
 		delete this->rtcpTuple;
+		this->rtcpTuple = nullptr;
 	}
 
 	void PlainRtpTransport::FillJson(json& jsonObject) const
@@ -178,42 +179,19 @@ namespace RTC
 				(*jsonRtcpTupleIt)["protocol"]  = "udp";
 			}
 		}
-
-		// Add headerExtensionIds.
-		jsonObject["rtpHeaderExtensions"] = json::object();
-		auto jsonRtpHeaderExtensionsIt    = jsonObject.find("rtpHeaderExtensions");
-
-		if (this->rtpHeaderExtensionIds.mid != 0u)
-			(*jsonRtpHeaderExtensionsIt)["mid"] = this->rtpHeaderExtensionIds.mid;
-
-		if (this->rtpHeaderExtensionIds.rid != 0u)
-			(*jsonRtpHeaderExtensionsIt)["rid"] = this->rtpHeaderExtensionIds.rid;
-
-		if (this->rtpHeaderExtensionIds.rrid != 0u)
-			(*jsonRtpHeaderExtensionsIt)["rrid"] = this->rtpHeaderExtensionIds.rrid;
-
-		if (this->rtpHeaderExtensionIds.absSendTime != 0u)
-			(*jsonRtpHeaderExtensionsIt)["absSendTime"] = this->rtpHeaderExtensionIds.absSendTime;
-
-		// Add rtpListener.
-		this->rtpListener.FillJson(jsonObject["rtpListener"]);
 	}
 
 	void PlainRtpTransport::FillJsonStats(json& jsonArray)
 	{
 		MS_TRACE();
 
-		jsonArray.emplace_back(json::value_t::object);
+		// Call the parent method.
+		RTC::Transport::FillJsonStats(jsonArray);
+
 		auto& jsonObject = jsonArray[0];
 
 		// Add type.
 		jsonObject["type"] = "plain-rtp-transport";
-
-		// Add transportId.
-		jsonObject["transportId"] = this->id;
-
-		// Add timestamp.
-		jsonObject["timestamp"] = DepLibUV::GetTime();
 
 		// Add rtcpMux.
 		jsonObject["rtcpMux"] = this->rtcpMux;
@@ -247,18 +225,6 @@ namespace RTC
 		// Add rtcpTuple.
 		if (!this->rtcpMux && this->rtcpTuple != nullptr)
 			this->rtcpTuple->FillJson(jsonObject["rtcpTuple"]);
-
-		// Add bytesReceived.
-		jsonObject["bytesReceived"] = RTC::Transport::GetReceivedBytes();
-
-		// Add bytesSent.
-		jsonObject["bytesSent"] = RTC::Transport::GetSentBytes();
-
-		// Add recvBitrate.
-		jsonObject["recvBitrate"] = RTC::Transport::GetRecvBitrate();
-
-		// Add sendBitrate.
-		jsonObject["sendBitrate"] = RTC::Transport::GetSendBitrate();
 	}
 
 	void PlainRtpTransport::HandleRequest(Channel::Request* request)
@@ -297,21 +263,33 @@ namespace RTC
 
 					auto jsonPortIt = request->data.find("port");
 
-					if (jsonPortIt == request->data.end() || !jsonPortIt->is_number_unsigned())
+					// clang-format off
+					if (
+						jsonPortIt == request->data.end() ||
+						!Utils::Json::IsPositiveInteger(*jsonPortIt)
+					)
+					// clang-format on
+					{
 						MS_THROW_TYPE_ERROR("missing port");
+					}
 
 					port = jsonPortIt->get<uint16_t>();
 
 					auto jsonRtcpPortIt = request->data.find("rtcpPort");
 
-					if (jsonRtcpPortIt != request->data.end() && jsonRtcpPortIt->is_number_unsigned())
+					// clang-format off
+					if (
+						jsonRtcpPortIt != request->data.end() &&
+						Utils::Json::IsPositiveInteger(*jsonRtcpPortIt)
+					)
+					// clang-format on
 					{
 						if (this->rtcpMux)
 							MS_THROW_TYPE_ERROR("cannot set rtcpPort with rtcpMux enabled");
 
 						rtcpPort = jsonRtcpPortIt->get<uint16_t>();
 					}
-					else if (jsonRtcpPortIt == request->data.end() || !jsonRtcpPortIt->is_number_unsigned())
+					else
 					{
 						if (!this->rtcpMux)
 							MS_THROW_TYPE_ERROR("missing rtcpPort (required with rtcpMux disabled)");
@@ -451,18 +429,26 @@ namespace RTC
 		return this->tuple != nullptr;
 	}
 
-	void PlainRtpTransport::SendRtpPacket(
-	  RTC::RtpPacket* packet, RTC::Consumer* /*consumer*/, bool /*retransmitted*/, bool /*probation*/)
+	void PlainRtpTransport::SendRtpPacket(RTC::RtpPacket* packet, RTC::Transport::onSendCallback* cb)
 	{
 		MS_TRACE();
 
 		if (!IsConnected())
+		{
+			if (cb)
+			{
+				(*cb)(false);
+
+				delete cb;
+			}
+
 			return;
+		}
 
 		const uint8_t* data = packet->GetData();
 		size_t len          = packet->GetSize();
 
-		this->tuple->Send(data, len);
+		this->tuple->Send(data, len, cb);
 
 		// Increase send transmission.
 		RTC::Transport::DataSent(len);
@@ -506,7 +492,21 @@ namespace RTC
 		RTC::Transport::DataSent(len);
 	}
 
-	inline void PlainRtpTransport::OnPacketRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	void PlainRtpTransport::SendSctpData(const uint8_t* data, size_t len)
+	{
+		MS_TRACE();
+
+		if (!IsConnected())
+			return;
+
+		this->tuple->Send(data, len);
+
+		// Increase send transmission.
+		RTC::Transport::DataSent(len);
+	}
+
+	inline void PlainRtpTransport::OnPacketReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
 
@@ -516,12 +516,17 @@ namespace RTC
 		// Check if it's RTCP.
 		if (RTC::RTCP::Packet::IsRtcp(data, len))
 		{
-			OnRtcpDataRecv(tuple, data, len);
+			OnRtcpDataReceived(tuple, data, len);
 		}
 		// Check if it's RTP.
 		else if (RTC::RtpPacket::IsRtp(data, len))
 		{
-			OnRtpDataRecv(tuple, data, len);
+			OnRtpDataReceived(tuple, data, len);
+		}
+		// Check if it's SCTP.
+		else if (RTC::SctpAssociation::IsSctp(data, len))
+		{
+			OnSctpDataReceived(tuple, data, len);
 		}
 		else
 		{
@@ -529,7 +534,8 @@ namespace RTC
 		}
 	}
 
-	inline void PlainRtpTransport::OnRtpDataRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	inline void PlainRtpTransport::OnRtpDataReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
 
@@ -538,39 +544,37 @@ namespace RTC
 		{
 			// Do nothing.
 		}
-		// If multiSource is not set, check whether we have RTP tuple or whether
-		// comedia mode is set.
-		else
+		// Otherwise, if we don't have a RTP tuple yet, check whether comedia mode
+		// is set,
+		else if (!this->tuple)
 		{
-			// If RTP tuple is unset, set it if we are in comedia mode.
-			if (!this->tuple)
+			if (!this->comedia)
 			{
-				if (!this->comedia)
-				{
-					MS_DEBUG_TAG(rtp, "ignoring RTP packet while not connected");
-
-					return;
-				}
-
-				MS_DEBUG_TAG(rtp, "setting RTP tuple (comedia mode enabled)");
-
-				this->tuple = new RTC::TransportTuple(tuple);
-
-				if (!this->listenIp.announcedIp.empty())
-					this->tuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
-
-				// If not yet connected do it now.
-				if (!IsConnected())
-					RTC::Transport::Connected();
-			}
-
-			// Verify that the packet's tuple matches our RTP tuple.
-			if (!this->tuple->Compare(tuple))
-			{
-				MS_DEBUG_TAG(rtp, "ignoring RTP packet from unknown IP:port");
+				MS_DEBUG_TAG(rtp, "ignoring RTP packet while not connected");
 
 				return;
 			}
+
+			MS_DEBUG_TAG(rtp, "setting RTP tuple (comedia mode enabled)");
+
+			auto wasConnected = IsConnected();
+
+			this->tuple = new RTC::TransportTuple(tuple);
+
+			if (!this->listenIp.announcedIp.empty())
+				this->tuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
+
+			// If not yet connected do it now.
+			if (!wasConnected)
+				RTC::Transport::Connected();
+		}
+		// Otherwise, if RTP tuple is set, verify that it matches the origin
+		// of the packet.
+		else if (!this->tuple->Compare(tuple))
+		{
+			MS_DEBUG_TAG(rtp, "ignoring RTP packet from unknown IP:port");
+
+			return;
 		}
 
 		RTC::RtpPacket* packet = RTC::RtpPacket::Parse(data, len);
@@ -582,41 +586,11 @@ namespace RTC
 			return;
 		}
 
-		// Apply the Transport RTP header extension ids so the RTP listener can use them.
-		packet->SetMidExtensionId(this->rtpHeaderExtensionIds.mid);
-		packet->SetRidExtensionId(this->rtpHeaderExtensionIds.rid);
-		packet->SetRepairedRidExtensionId(this->rtpHeaderExtensionIds.rrid);
-		packet->SetAbsSendTimeExtensionId(this->rtpHeaderExtensionIds.absSendTime);
-
-		// Get the associated Producer.
-		RTC::Producer* producer = this->rtpListener.GetProducer(packet);
-
-		if (producer == nullptr)
-		{
-			MS_WARN_TAG(
-			  rtp,
-			  "no suitable Producer for received RTP packet [ssrc:%" PRIu32 ", payloadType:%" PRIu8 "]",
-			  packet->GetSsrc(),
-			  packet->GetPayloadType());
-
-			delete packet;
-
-			return;
-		}
-
-		// MS_DEBUG_DEV(
-		//   "RTP packet received [ssrc:%" PRIu32 ", payloadType:%" PRIu8 ", producerId:%s]",
-		//   packet->GetSsrc(),
-		//   packet->GetPayloadType(),
-		//   producer->id.c_str());
-
-		// Pass the RTP packet to the corresponding Producer.
-		producer->ReceiveRtpPacket(packet);
-
-		delete packet;
+		// Pass the packet to the parent transport.
+		RTC::Transport::ReceiveRtpPacket(packet);
 	}
 
-	inline void PlainRtpTransport::OnRtcpDataRecv(
+	inline void PlainRtpTransport::OnRtcpDataReceived(
 	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
@@ -626,63 +600,61 @@ namespace RTC
 		{
 			// Just allow it.
 		}
-		// If multiSource is not set, check whether we have RTP tuple (if RTCP-mux)
-		// or RTCP tuple or whether comedia mode is set.
-		else
+		// Otherwise, if we don't have a RTP tuple yet, check whether RTCP-mux
+		// and comedia mode are set.
+		else if (this->rtcpMux && !this->tuple)
 		{
-			// If RTCP-mux and RTP tuple is unset, set it if we are in comedia mode.
-			if (this->rtcpMux && !this->tuple)
+			if (!this->comedia)
 			{
-				if (!this->comedia)
-				{
-					MS_DEBUG_TAG(rtcp, "ignoring RTCP packet while not connected");
-
-					return;
-				}
-
-				MS_DEBUG_TAG(rtp, "setting RTP tuple (comedia mode enabled)");
-
-				this->tuple = new RTC::TransportTuple(tuple);
-
-				if (!this->listenIp.announcedIp.empty())
-					this->tuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
-
-				// If not yet connected do it now.
-				if (!IsConnected())
-					RTC::Transport::Connected();
-			}
-			// If no RTCP-mux and RTCP tuple is unset, set it if we are in comedia mode.
-			else if (!this->rtcpMux && !this->rtcpTuple)
-			{
-				if (!this->comedia)
-				{
-					MS_DEBUG_TAG(rtcp, "ignoring RTCP packet while not connected");
-
-					return;
-				}
-
-				MS_DEBUG_TAG(rtcp, "setting RTCP tuple (comedia mode enabled)");
-
-				this->rtcpTuple = new RTC::TransportTuple(tuple);
-
-				if (!this->listenIp.announcedIp.empty())
-					this->rtcpTuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
-			}
-
-			// If RTCP-mux verify that the packet's tuple matches our RTP tuple.
-			if (this->rtcpMux && !this->tuple->Compare(tuple))
-			{
-				MS_DEBUG_TAG(rtcp, "ignoring RTCP packet from unknown IP:port");
+				MS_DEBUG_TAG(rtcp, "ignoring RTCP packet while not connected");
 
 				return;
 			}
-			// If no RTCP-mux verify that the packet's tuple matches our RTCP tuple.
-			else if (!this->rtcpMux && !this->rtcpTuple->Compare(tuple))
+
+			MS_DEBUG_TAG(rtp, "setting RTP tuple (comedia mode enabled)");
+
+			auto wasConnected = IsConnected();
+
+			this->tuple = new RTC::TransportTuple(tuple);
+
+			if (!this->listenIp.announcedIp.empty())
+				this->tuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
+
+			// If not yet connected do it now.
+			if (!wasConnected)
+				RTC::Transport::Connected();
+		}
+		// Otherwise, if RTCP-mux is unset and RTCP tuple is unset, set it if we
+		// are in comedia mode.
+		else if (!this->rtcpMux && !this->rtcpTuple)
+		{
+			if (!this->comedia)
 			{
-				MS_DEBUG_TAG(rtcp, "ignoring RTCP packet from unknown IP:port");
+				MS_DEBUG_TAG(rtcp, "ignoring RTCP packet while not connected");
 
 				return;
 			}
+
+			MS_DEBUG_TAG(rtcp, "setting RTCP tuple (comedia mode enabled)");
+
+			this->rtcpTuple = new RTC::TransportTuple(tuple);
+
+			if (!this->listenIp.announcedIp.empty())
+				this->rtcpTuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
+		}
+		// If RTCP-mux verify that the packet's tuple matches our RTP tuple.
+		else if (this->rtcpMux && !this->tuple->Compare(tuple))
+		{
+			MS_DEBUG_TAG(rtcp, "ignoring RTCP packet from unknown IP:port");
+
+			return;
+		}
+		// If no RTCP-mux verify that the packet's tuple matches our RTCP tuple.
+		else if (!this->rtcpMux && !this->rtcpTuple->Compare(tuple))
+		{
+			MS_DEBUG_TAG(rtcp, "ignoring RTCP packet from unknown IP:port");
+
+			return;
 		}
 
 		RTC::RTCP::Packet* packet = RTC::RTCP::Packet::Parse(data, len);
@@ -694,51 +666,66 @@ namespace RTC
 			return;
 		}
 
-		// Handle each RTCP packet.
-		while (packet != nullptr)
+		// Pass the packet to the parent transport.
+		RTC::Transport::ReceiveRtcpPacket(packet);
+	}
+
+	inline void PlainRtpTransport::OnSctpDataReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	{
+		MS_TRACE();
+
+		// If multiSource reject it.
+		if (this->multiSource)
 		{
-			ReceiveRtcpPacket(packet);
+			MS_DEBUG_TAG(sctp, "ignoring SCTP packet in multiSource mode");
 
-			RTC::RTCP::Packet* previousPacket = packet;
-
-			packet = packet->GetNext();
-			delete previousPacket;
+			return;
 		}
+		// Otherwise, if we don't have a RTP tuple yet, check whether comedia mode
+		// is set,
+		else if (!this->tuple)
+		{
+			if (!this->comedia)
+			{
+				MS_DEBUG_TAG(sctp, "ignoring SCTP packet while not connected");
+
+				return;
+			}
+
+			MS_DEBUG_TAG(sctp, "setting RTP/SCTP tuple (comedia mode enabled)");
+
+			auto wasConnected = IsConnected();
+
+			this->tuple = new RTC::TransportTuple(tuple);
+
+			if (!this->listenIp.announcedIp.empty())
+				this->tuple->SetLocalAnnouncedIp(this->listenIp.announcedIp);
+
+			// If not yet connected do it now.
+			if (!wasConnected)
+				RTC::Transport::Connected();
+		}
+		// Otherwise, if RTP tuple is set, verify that it matches the origin
+		// of the packet.
+		if (!this->tuple->Compare(tuple))
+		{
+			MS_DEBUG_TAG(sctp, "ignoring SCTP packet from unknown IP:port");
+
+			return;
+		}
+
+		// Pass it to the parent transport.
+		RTC::Transport::ReceiveSctpData(data, len);
 	}
 
-	void PlainRtpTransport::UserOnNewProducer(RTC::Producer* /*producer*/)
-	{
-		MS_TRACE();
-
-		// Do nothing.
-	}
-
-	void PlainRtpTransport::UserOnNewConsumer(RTC::Consumer* /*consumer*/)
-	{
-		MS_TRACE();
-	}
-
-	void PlainRtpTransport::UserOnRembFeedback(RTC::RTCP::FeedbackPsRembPacket* /*remb*/)
-	{
-		MS_TRACE();
-
-		// Do nothing.
-	}
-
-	inline void PlainRtpTransport::OnConsumerNeedBitrateChange(RTC::Consumer* /*consumer*/)
-	{
-		MS_TRACE();
-
-		// Do nothing.
-	}
-
-	inline void PlainRtpTransport::OnPacketRecv(
+	inline void PlainRtpTransport::OnUdpSocketPacketReceived(
 	  RTC::UdpSocket* socket, const uint8_t* data, size_t len, const struct sockaddr* remoteAddr)
 	{
 		MS_TRACE();
 
 		RTC::TransportTuple tuple(socket, remoteAddr);
 
-		OnPacketRecv(&tuple, data, len);
+		OnPacketReceived(&tuple, data, len);
 	}
 } // namespace RTC

@@ -8,6 +8,15 @@ This document is intended for mediasoup developers.
 The `package.json` file in the main folder includes the following scripts:
 
 
+### `num run typescript:build`
+
+Compiles mediasoup TypeScript code (`lib` folder) into ES6 JavaScript and places it into the `lib` directory.
+
+
+### `num run typescript:watch`
+
+Compiles mediasoup TypeScript code (`lib` folder) into ES6 JavaScript, places it into the `lib` directory an watches for changes in the TypeScript files.
+
 ### `npm run lint`
 
 Runs both `npm run lint:node` and `npm run lint:worker`.
@@ -109,7 +118,9 @@ Rewrites mediasoup-worker C++ files using [clang-format](https://clang.llvm.org/
 
 Generates the `worker/compile_commands_template.json` file which is a ["Clang compilation database"](https://clang.llvm.org/docs/JSONCompilationDatabase.html).
 
-It requires [jq](https://stedolan.github.io/jq/) command-line JSON processor. Install it in Debian/Ubuntu via `apt install jq` and in OSX via `brew install jq`.
+It requires [Bear](https://github.com/rizsotto/Bear) and [jq](https://stedolan.github.io/jq/) command-line JSON processor. Install them in Debian/Ubuntu via `apt install bear jq` and in OSX via `brew install bear jq`.
+
+**NOTE:** For now, Bear version must be 2.1.X.
 
 **NOTE:** Before running `make bear` you must have mediasoup C/C++ dependencies already compiled. To be sure, run `make clean-all && make` before running `make bear`.
 
@@ -120,7 +131,7 @@ Runs [clang-tidy](http://clang.llvm.org/extra/clang-tidy/) and performs C++ code
 
 **Requirements:**
 
-* `make bear` must have been called first.
+* `make clean-all`, then `make` and then `make bear` must have been called first.
 * [PyYAML](https://pyyaml.org/) is required.
   - In OSX install it with `brew install libyaml` and `sudo easy_install-X.Y pyyaml`.
 

@@ -5,6 +5,7 @@
 #include "RTC/RTCP/FuzzerReceiverReport.hpp"
 #include "RTC/RTCP/FuzzerSdes.hpp"
 #include "RTC/RTCP/FuzzerSenderReport.hpp"
+#include "RTC/RTCP/FuzzerXr.hpp"
 #include "RTC/RTCP/Packet.hpp"
 
 void Fuzzer::RTC::RTCP::Packet::Fuzz(const uint8_t* data, size_t len)
@@ -79,12 +80,22 @@ void Fuzzer::RTC::RTCP::Packet::Fuzz(const uint8_t* data, size_t len)
 				break;
 			}
 
+			case ::RTC::RTCP::Type::XR:
+			{
+				auto* xr = dynamic_cast<::RTC::RTCP::ExtendedReportPacket*>(packet);
+
+				RTC::RTCP::ExtendedReport::Fuzz(xr);
+
+				break;
+			}
+
 			default:
 			{
 			}
 		}
 
 		packet = packet->GetNext();
+
 		delete previousPacket;
 	}
 }

@@ -1,18 +1,12 @@
 #define MS_CLASS "RTC::WebRtcTransport"
-// #define MS_LOG_DEV
+// #define MS_LOG_DEV_LEVEL 3
 
 #include "RTC/WebRtcTransport.hpp"
-#include "DepLibUV.hpp"
 #include "Logger.hpp"
 #include "MediaSoupErrors.hpp"
 #include "Utils.hpp"
 #include "Channel/Notifier.hpp"
-#include "RTC/RTCP/FeedbackPsRemb.hpp"
-#include "RTC/RtpDictionaries.hpp"
-#include <cmath>    // std::pow()
-#include <iterator> // std::ostream_iterator
-#include <map>
-#include <sstream> // std::ostringstream
+#include <cmath> // std::pow()
 
 namespace RTC
 {
@@ -35,15 +29,11 @@ namespace RTC
 	/* Instance methods. */
 
 	WebRtcTransport::WebRtcTransport(const std::string& id, RTC::Transport::Listener* listener, json& data)
-	  : RTC::Transport::Transport(id, listener)
+	  : RTC::Transport::Transport(id, listener, data)
 	{
 		MS_TRACE();
 
 		bool enableUdp{ true };
-		bool enableTcp{ false };
-		bool preferUdp{ false };
-		bool preferTcp{ false };
-
 		auto jsonEnableUdpIt = data.find("enableUdp");
 
 		if (jsonEnableUdpIt != data.end())
@@ -54,6 +44,7 @@ namespace RTC
 			enableUdp = jsonEnableUdpIt->get<bool>();
 		}
 
+		bool enableTcp{ false };
 		auto jsonEnableTcpIt = data.find("enableTcp");
 
 		if (jsonEnableTcpIt != data.end())
@@ -64,6 +55,7 @@ namespace RTC
 			enableTcp = jsonEnableTcpIt->get<bool>();
 		}
 
+		bool preferUdp{ false };
 		auto jsonPreferUdpIt = data.find("preferUdp");
 
 		if (jsonPreferUdpIt != data.end())
@@ -74,6 +66,7 @@ namespace RTC
 			preferUdp = jsonPreferUdpIt->get<bool>();
 		}
 
+		bool preferTcp{ false };
 		auto jsonPreferTcpIt = data.find("preferTcp");
 
 		if (jsonPreferTcpIt != data.end())
@@ -126,32 +119,6 @@ namespace RTC
 
 				listenIp.announcedIp.assign(jsonAnnouncedIpIt->get<std::string>());
 			}
-		}
-
-		auto jsonInitialAvailableOutgoingBitrateIt = data.find("initialAvailableOutgoingBitrate");
-
-		if (jsonInitialAvailableOutgoingBitrateIt != data.end())
-		{
-			if (!jsonInitialAvailableOutgoingBitrateIt->is_number_unsigned())
-				MS_THROW_TYPE_ERROR("wrong initialAvailableOutgoingBitrate (not a number)");
-
-			this->initialAvailableOutgoingBitrate = jsonInitialAvailableOutgoingBitrateIt->get<uint32_t>();
-		}
-
-		auto jsonMinimumAvailableOutgoingBitrateIt = data.find("minimumAvailableOutgoingBitrate");
-
-		if (jsonMinimumAvailableOutgoingBitrateIt != data.end())
-		{
-			if (!jsonMinimumAvailableOutgoingBitrateIt->is_number_unsigned())
-				MS_THROW_TYPE_ERROR("wrong minimumAvailableOutgoingBitrate (not a number)");
-
-			this->minimumAvailableOutgoingBitrate = jsonMinimumAvailableOutgoingBitrateIt->get<uint32_t>();
-		}
-
-		if (this->minimumAvailableOutgoingBitrate > this->initialAvailableOutgoingBitrate)
-		{
-			MS_THROW_TYPE_ERROR(
-			  "minimumAvailableOutgoingBitrate bigger than initialAvailableOutgoingBitrate");
 		}
 
 		try
@@ -257,8 +224,10 @@ namespace RTC
 		// Must delete the DTLS transport first since it will generate a DTLS alert
 		// to be sent.
 		delete this->dtlsTransport;
+		this->dtlsTransport = nullptr;
 
 		delete this->iceServer;
+		this->iceServer = nullptr;
 
 		for (auto& kv : this->udpSockets)
 		{
@@ -274,21 +243,23 @@ namespace RTC
 
 			delete tcpServer;
 		}
+		this->tcpServers.clear();
 
 		this->iceCandidates.clear();
 
 		delete this->srtpRecvSession;
+		this->srtpRecvSession = nullptr;
 
 		delete this->srtpSendSession;
-
-		delete this->rembClient;
-
-		delete this->rembServer;
+		this->srtpSendSession = nullptr;
 	}
 
 	void WebRtcTransport::FillJson(json& jsonObject) const
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		// Call the parent method.
 		RTC::Transport::FillJson(jsonObject);
@@ -336,8 +307,8 @@ namespace RTC
 		}
 
 		// Add iceSelectedTuple.
-		if (this->iceSelectedTuple != nullptr)
-			this->iceSelectedTuple->FillJson(jsonObject["iceSelectedTuple"]);
+		if (this->iceServer->GetSelectedTuple())
+			this->iceServer->GetSelectedTuple()->FillJson(jsonObject["iceSelectedTuple"]);
 
 		// Add dtlsParameters.
 		jsonObject["dtlsParameters"] = json::object();
@@ -396,42 +367,22 @@ namespace RTC
 				jsonObject["dtlsState"] = "closed";
 				break;
 		}
-
-		// Add headerExtensionIds.
-		jsonObject["rtpHeaderExtensions"] = json::object();
-		auto jsonRtpHeaderExtensionsIt    = jsonObject.find("rtpHeaderExtensions");
-
-		if (this->rtpHeaderExtensionIds.mid != 0u)
-			(*jsonRtpHeaderExtensionsIt)["mid"] = this->rtpHeaderExtensionIds.mid;
-
-		if (this->rtpHeaderExtensionIds.rid != 0u)
-			(*jsonRtpHeaderExtensionsIt)["rid"] = this->rtpHeaderExtensionIds.rid;
-
-		if (this->rtpHeaderExtensionIds.rrid != 0u)
-			(*jsonRtpHeaderExtensionsIt)["rrid"] = this->rtpHeaderExtensionIds.rrid;
-
-		if (this->rtpHeaderExtensionIds.absSendTime != 0u)
-			(*jsonRtpHeaderExtensionsIt)["absSendTime"] = this->rtpHeaderExtensionIds.absSendTime;
-
-		// Add rtpListener.
-		this->rtpListener.FillJson(jsonObject["rtpListener"]);
 	}
 
 	void WebRtcTransport::FillJsonStats(json& jsonArray)
 	{
 		MS_TRACE();
 
-		jsonArray.emplace_back(json::value_t::object);
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
+
+		// Call the parent method.
+		RTC::Transport::FillJsonStats(jsonArray);
+
 		auto& jsonObject = jsonArray[0];
 
 		// Add type.
 		jsonObject["type"] = "webrtc-transport";
-
-		// Add transportId.
-		jsonObject["transportId"] = this->id;
-
-		// Add timestamp.
-		jsonObject["timestamp"] = DepLibUV::GetTime();
 
 		// Add iceRole (we are always "controlled").
 		jsonObject["iceRole"] = "controlled";
@@ -453,6 +404,12 @@ namespace RTC
 				break;
 		}
 
+		if (this->iceServer->GetSelectedTuple())
+		{
+			// Add iceSelectedTuple.
+			this->iceServer->GetSelectedTuple()->FillJson(jsonObject["iceSelectedTuple"]);
+		}
+
 		// Add dtlsState.
 		switch (this->dtlsTransport->GetState())
 		{
@@ -472,36 +429,6 @@ namespace RTC
 				jsonObject["dtlsState"] = "closed";
 				break;
 		}
-
-		if (this->iceSelectedTuple != nullptr)
-		{
-			// Add iceSelectedTuple.
-			this->iceSelectedTuple->FillJson(jsonObject["iceSelectedTuple"]);
-		}
-
-		// Add bytesReceived.
-		jsonObject["bytesReceived"] = RTC::Transport::GetReceivedBytes();
-
-		// Add bytesSent.
-		jsonObject["bytesSent"] = RTC::Transport::GetSentBytes();
-
-		// Add recvBitrate.
-		jsonObject["recvBitrate"] = RTC::Transport::GetRecvBitrate();
-
-		// Add sendBitrate.
-		jsonObject["sendBitrate"] = RTC::Transport::GetSendBitrate();
-
-		// Add availableOutgoingBitrate.
-		if (this->rembClient)
-			jsonObject["availableOutgoingBitrate"] = this->rembClient->GetAvailableBitrate();
-
-		// Add availableIncomingBitrate.
-		if (this->rembServer)
-			jsonObject["availableIncomingBitrate"] = this->rembServer->GetAvailableBitrate();
-
-		// Add maxIncomingBitrate.
-		if (this->maxIncomingBitrate != 0u)
-			jsonObject["maxIncomingBitrate"] = this->maxIncomingBitrate;
 	}
 
 	void WebRtcTransport::HandleRequest(Channel::Request* request)
@@ -513,7 +440,7 @@ namespace RTC
 			case Channel::Request::MethodId::TRANSPORT_CONNECT:
 			{
 				// Ensure this method is not called twice.
-				if (this->connected)
+				if (this->connectCalled)
 					MS_THROW_ERROR("connect() already called");
 
 				RTC::DtlsTransport::Fingerprint dtlsRemoteFingerprint;
@@ -606,7 +533,7 @@ namespace RTC
 					}
 				}
 
-				this->connected = true;
+				this->connectCalled = true;
 
 				// Pass the remote fingerprint to the DTLS transport.
 				if (this->dtlsTransport->SetRemoteFingerprint(dtlsRemoteFingerprint))
@@ -633,29 +560,6 @@ namespace RTC
 				}
 
 				request->Accept(data);
-
-				break;
-			}
-
-			case Channel::Request::MethodId::TRANSPORT_SET_MAX_INCOMING_BITRATE:
-			{
-				static constexpr uint32_t MinBitrate{ 10000 };
-
-				auto jsonBitrateIt = request->data.find("bitrate");
-
-				if (jsonBitrateIt == request->data.end() || !jsonBitrateIt->is_number_unsigned())
-					MS_THROW_TYPE_ERROR("missing bitrate");
-
-				auto bitrate = jsonBitrateIt->get<uint32_t>();
-
-				if (bitrate < MinBitrate)
-					bitrate = MinBitrate;
-
-				this->maxIncomingBitrate = bitrate;
-
-				MS_DEBUG_TAG(bwe, "WebRtcTransport maximum incoming bitrate set to %" PRIu32 "bps", bitrate);
-
-				request->Accept();
 
 				break;
 			}
@@ -696,14 +600,28 @@ namespace RTC
 
 	inline bool WebRtcTransport::IsConnected() const
 	{
+		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
+
+		// clang-format off
 		return (
-		  this->iceSelectedTuple != nullptr &&
-		  this->dtlsTransport->GetState() == RTC::DtlsTransport::DtlsState::CONNECTED);
+			(
+				this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
+				this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED
+			) &&
+			this->dtlsTransport->GetState() == RTC::DtlsTransport::DtlsState::CONNECTED
+		);
+		// clang-format on
 	}
 
 	void WebRtcTransport::MayRunDtlsTransport()
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		// Do nothing if we have the same local DTLS role as the DTLS transport.
 		// NOTE: local role in DTLS transport can be NONE, but not ours.
@@ -717,9 +635,12 @@ namespace RTC
 			// 'completed'.
 			case RTC::DtlsTransport::Role::AUTO:
 			{
+				// clang-format off
 				if (
-				  this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
-				  this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED)
+					this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
+					this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED
+				)
+				// clang-format on
 				{
 					MS_DEBUG_TAG(
 					  dtls, "transition from DTLS local role 'auto' to 'server' and running DTLS transport");
@@ -740,9 +661,12 @@ namespace RTC
 			//   https://bugs.chromium.org/p/webrtc/issues/detail?id=3661
 			case RTC::DtlsTransport::Role::CLIENT:
 			{
+				// clang-format off
 				if (
-				  this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
-				  this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED)
+					this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
+					this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED
+				)
+				// clang-format on
 				{
 					MS_DEBUG_TAG(dtls, "running DTLS transport in local role 'client'");
 
@@ -756,9 +680,12 @@ namespace RTC
 			// USE-CANDIDATE) or 'completed'.
 			case RTC::DtlsTransport::Role::SERVER:
 			{
+				// clang-format off
 				if (
-				  this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
-				  this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED)
+					this->iceServer->GetState() == RTC::IceServer::IceState::CONNECTED ||
+					this->iceServer->GetState() == RTC::IceServer::IceState::COMPLETED
+				)
+				// clang-format on
 				{
 					MS_DEBUG_TAG(dtls, "running DTLS transport in local role 'server'");
 
@@ -775,63 +702,56 @@ namespace RTC
 		}
 	}
 
-	void WebRtcTransport::SendRtpPacket(
-	  RTC::RtpPacket* packet, RTC::Consumer* consumer, bool retransmitted, bool probation)
+	void WebRtcTransport::SendRtpPacket(RTC::RtpPacket* packet, RTC::Transport::onSendCallback* cb)
 	{
 		MS_TRACE();
 
 		if (!IsConnected())
-			return;
-
-		// Ensure there is sending SRTP session.
-		if (this->srtpSendSession == nullptr)
 		{
-			MS_WARN_DEV("ignoring RTP packet due to non sending SRTP session");
+			if (cb)
+			{
+				(*cb)(false);
+
+				delete cb;
+			}
 
 			return;
 		}
 
-		auto seq            = packet->GetSequenceNumber();
+		// Ensure there is sending SRTP session.
+		if (!this->srtpSendSession)
+		{
+			MS_WARN_DEV("ignoring RTP packet due to non sending SRTP session");
+
+			if (cb)
+			{
+				(*cb)(false);
+
+				delete cb;
+			}
+
+			return;
+		}
+
 		const uint8_t* data = packet->GetData();
 		size_t len          = packet->GetSize();
 
 		if (!this->srtpSendSession->EncryptRtp(&data, &len))
-			return;
+		{
+			if (cb)
+			{
+				(*cb)(false);
 
-		this->iceSelectedTuple->Send(data, len);
+				delete cb;
+			}
+
+			return;
+		}
+
+		this->iceServer->GetSelectedTuple()->Send(data, len, cb);
 
 		// Increase send transmission.
 		RTC::Transport::DataSent(len);
-
-		// Feed the REMB client if this is a simulcast or SVC Consumer.
-		// clang-format off
-		if (
-			this->rembClient &&
-			(
-				consumer->GetType() == RTC::RtpParameters::Type::SIMULCAST ||
-				consumer->GetType() == RTC::RtpParameters::Type::SVC
-			)
-		)
-		// clang-format on
-		{
-			if (!probation)
-			{
-				this->rembClient->SentRtpPacket(packet, retransmitted);
-
-				// May need to generate probation packets.
-				for (int count{ 1 }; count <= 3; ++count)
-				{
-					if (!this->rembClient->IsProbationNeeded())
-						break;
-
-					consumer->SendProbationRtpPacket(seq);
-				}
-			}
-			else
-			{
-				this->rembClient->SentProbationRtpPacket(packet);
-			}
-		}
 	}
 
 	void WebRtcTransport::SendRtcpPacket(RTC::RTCP::Packet* packet)
@@ -845,7 +765,7 @@ namespace RTC
 		size_t len          = packet->GetSize();
 
 		// Ensure there is sending SRTP session.
-		if (this->srtpSendSession == nullptr)
+		if (!this->srtpSendSession)
 		{
 			MS_WARN_DEV("ignoring RTCP packet due to non sending SRTP session");
 
@@ -855,121 +775,10 @@ namespace RTC
 		if (!this->srtpSendSession->EncryptRtcp(&data, &len))
 			return;
 
-		this->iceSelectedTuple->Send(data, len);
+		this->iceServer->GetSelectedTuple()->Send(data, len);
 
 		// Increase send transmission.
 		RTC::Transport::DataSent(len);
-	}
-
-	void WebRtcTransport::DistributeAvailableOutgoingBitrate()
-	{
-		MS_TRACE();
-
-		// TODO: Uncomment when Transport-CC is ready.
-		// MS_ASSERT(this->rembClient || this->transportCcClient, "no REMB client nor Transport-CC client");
-		MS_ASSERT(this->rembClient, "no REMB client");
-
-		std::multimap<uint16_t, RTC::Consumer*> multimapPriorityConsumer;
-		uint16_t totalPriorities{ 0 };
-
-		// Fill the map with Consumers and their priority (if > 0).
-		for (auto& kv : this->mapConsumers)
-		{
-			auto* consumer = kv.second;
-			auto priority  = consumer->GetBitratePriority();
-
-			if (priority > 0)
-			{
-				multimapPriorityConsumer.emplace(priority, consumer);
-				totalPriorities += priority;
-			}
-		}
-
-		// Nobody wants bitrate. Exit.
-		if (totalPriorities == 0)
-			return;
-
-		uint32_t availableBitrate{ 0 };
-
-		if (this->rembClient)
-		{
-			availableBitrate = this->rembClient->GetAvailableBitrate();
-
-			// Resechedule next REMB event.
-			this->rembClient->ResecheduleNextEvent();
-		}
-
-		MS_DEBUG_TAG(bwe, "before iterations [availableBitrate:%" PRIu32 "]", availableBitrate);
-
-		uint32_t remainingBitrate = availableBitrate;
-
-		// First of all, redistribute the available bitrate by taking into account
-		// Consumers' priorities.
-		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-		{
-			auto priority    = it->first;
-			auto consumer    = it->second;
-			uint32_t bitrate = (availableBitrate * priority) / totalPriorities;
-
-			MS_DEBUG_TAG(
-			  bwe,
-			  "main bitrate for Consumer [priority:%" PRIu16 ", bitrate:%" PRIu32 ", consumerId:%s]",
-			  priority,
-			  bitrate,
-			  consumer->id.c_str());
-
-			auto usedBitrate = consumer->UseAvailableBitrate(bitrate);
-
-			if (usedBitrate <= remainingBitrate)
-				remainingBitrate -= usedBitrate;
-			else
-				remainingBitrate = 0;
-		}
-
-		MS_DEBUG_TAG(bwe, "after first main iteration [remainingBitrate:%" PRIu32 "]", remainingBitrate);
-
-		// Then redistribute the remaining bitrate by allowing Consumers to increase
-		// layer by layer.
-		while (remainingBitrate >= 2000)
-		{
-			auto previousRemainingBitrate = remainingBitrate;
-
-			for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-			{
-				auto consumer = it->second;
-
-				MS_DEBUG_TAG(
-				  bwe,
-				  "layer bitrate for Consumer [bitrate:%" PRIu32 ", consumerId:%s]",
-				  remainingBitrate,
-				  consumer->id.c_str());
-
-				auto usedBitrate = consumer->IncreaseLayer(remainingBitrate);
-
-				MS_ASSERT(usedBitrate <= remainingBitrate, "Consumer used more layer bitrate than given");
-
-				remainingBitrate -= usedBitrate;
-
-				// No more.
-				if (remainingBitrate < 2000)
-					break;
-			}
-
-			// If no Consumer used bitrate, exit the loop.
-			if (remainingBitrate == previousRemainingBitrate)
-				break;
-		}
-
-		MS_DEBUG_TAG(
-		  bwe, "after layer-by-layer iteration [remainingBitrate:%" PRIu32 "]", remainingBitrate);
-
-		// Finally instruct Consumers to apply their computed layers.
-		for (auto it = multimapPriorityConsumer.rbegin(); it != multimapPriorityConsumer.rend(); ++it)
-		{
-			auto consumer = it->second;
-
-			consumer->ApplyLayers();
-		}
 	}
 
 	void WebRtcTransport::SendRtcpCompoundPacket(RTC::RTCP::CompoundPacket* packet)
@@ -983,7 +792,7 @@ namespace RTC
 		size_t len          = packet->GetSize();
 
 		// Ensure there is sending SRTP session.
-		if (this->srtpSendSession == nullptr)
+		if (!this->srtpSendSession)
 		{
 			MS_WARN_TAG(rtcp, "ignoring RTCP compound packet due to non sending SRTP session");
 
@@ -993,38 +802,57 @@ namespace RTC
 		if (!this->srtpSendSession->EncryptRtcp(&data, &len))
 			return;
 
-		this->iceSelectedTuple->Send(data, len);
+		this->iceServer->GetSelectedTuple()->Send(data, len);
 
 		// Increase send transmission.
 		RTC::Transport::DataSent(len);
 	}
 
-	inline void WebRtcTransport::OnPacketRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	void WebRtcTransport::SendSctpData(const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
+
+		// clang-format on
+		if (!IsConnected())
+		{
+			MS_WARN_TAG(sctp, "DTLS not connected, cannot send SCTP data");
+
+			return;
+		}
+
+		this->dtlsTransport->SendApplicationData(data, len);
+	}
+
+	inline void WebRtcTransport::OnPacketReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	{
+		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		// Increase receive transmission.
 		RTC::Transport::DataReceived(len);
 
 		// Check if it's STUN.
-		if (RTC::StunMessage::IsStun(data, len))
+		if (RTC::StunPacket::IsStun(data, len))
 		{
-			OnStunDataRecv(tuple, data, len);
+			OnStunDataReceived(tuple, data, len);
 		}
 		// Check if it's RTCP.
 		else if (RTC::RTCP::Packet::IsRtcp(data, len))
 		{
-			OnRtcpDataRecv(tuple, data, len);
+			OnRtcpDataReceived(tuple, data, len);
 		}
 		// Check if it's RTP.
 		else if (RTC::RtpPacket::IsRtp(data, len))
 		{
-			OnRtpDataRecv(tuple, data, len);
+			OnRtpDataReceived(tuple, data, len);
 		}
 		// Check if it's DTLS.
 		else if (RTC::DtlsTransport::IsDtls(data, len))
 		{
-			OnDtlsDataRecv(tuple, data, len);
+			OnDtlsDataReceived(tuple, data, len);
 		}
 		else
 		{
@@ -1032,29 +860,35 @@ namespace RTC
 		}
 	}
 
-	inline void WebRtcTransport::OnStunDataRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	inline void WebRtcTransport::OnStunDataReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
 
-		RTC::StunMessage* msg = RTC::StunMessage::Parse(data, len);
+		MS_ASSERT(this->iceServer, "no iceServer");
 
-		if (msg == nullptr)
+		RTC::StunPacket* packet = RTC::StunPacket::Parse(data, len);
+
+		if (!packet)
 		{
-			MS_WARN_DEV("ignoring wrong STUN message received");
+			MS_WARN_DEV("ignoring wrong STUN packet received");
 
 			return;
 		}
 
 		// Pass it to the IceServer.
-		this->iceServer->ProcessStunMessage(msg, tuple);
+		this->iceServer->ProcessStunPacket(packet, tuple);
 
-		delete msg;
+		delete packet;
 	}
 
-	inline void WebRtcTransport::OnDtlsDataRecv(
+	inline void WebRtcTransport::OnDtlsDataReceived(
 	  const RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		// Ensure it comes from a valid tuple.
 		if (!this->iceServer->IsValidTuple(tuple))
@@ -1084,9 +918,13 @@ namespace RTC
 		}
 	}
 
-	inline void WebRtcTransport::OnRtpDataRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	inline void WebRtcTransport::OnRtpDataReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		// Ensure DTLS is connected.
 		if (this->dtlsTransport->GetState() != RTC::DtlsTransport::DtlsState::CONNECTED)
@@ -1097,7 +935,7 @@ namespace RTC
 		}
 
 		// Ensure there is receiving SRTP session.
-		if (this->srtpRecvSession == nullptr)
+		if (!this->srtpRecvSession)
 		{
 			MS_DEBUG_TAG(srtp, "ignoring RTP packet due to non receiving SRTP session");
 
@@ -1113,11 +951,11 @@ namespace RTC
 		}
 
 		// Decrypt the SRTP packet.
-		if (!this->srtpRecvSession->DecryptSrtp(data, &len))
+		if (!this->srtpRecvSession->DecryptSrtp(const_cast<uint8_t*>(data), &len))
 		{
 			RTC::RtpPacket* packet = RTC::RtpPacket::Parse(data, len);
 
-			if (packet == nullptr)
+			if (!packet)
 			{
 				MS_WARN_TAG(srtp, "DecryptSrtp() failed due to an invalid RTP packet");
 			}
@@ -1138,65 +976,27 @@ namespace RTC
 
 		RTC::RtpPacket* packet = RTC::RtpPacket::Parse(data, len);
 
-		if (packet == nullptr)
+		if (!packet)
 		{
 			MS_WARN_TAG(rtp, "received data is not a valid RTP packet");
 
 			return;
 		}
 
-		// Apply the Transport RTP header extension ids so the RTP listener can use them.
-		packet->SetMidExtensionId(this->rtpHeaderExtensionIds.mid);
-		packet->SetRidExtensionId(this->rtpHeaderExtensionIds.rid);
-		packet->SetRepairedRidExtensionId(this->rtpHeaderExtensionIds.rrid);
-		packet->SetAbsSendTimeExtensionId(this->rtpHeaderExtensionIds.absSendTime);
-
-		// Feed the REMB server.
-		if (this->rembServer)
-		{
-			uint32_t absSendTime;
-
-			if (packet->ReadAbsSendTime(absSendTime))
-			{
-				this->rembServer->IncomingPacket(
-				  DepLibUV::GetTime(), packet->GetPayloadLength(), *packet, absSendTime);
-			}
-		}
-
-		// Get the associated Producer.
-		RTC::Producer* producer = this->rtpListener.GetProducer(packet);
-
-		if (producer == nullptr)
-		{
-			MS_WARN_TAG(
-			  rtp,
-			  "no suitable Producer for received RTP packet [ssrc:%" PRIu32 ", payloadType:%" PRIu8 "]",
-			  packet->GetSsrc(),
-			  packet->GetPayloadType());
-
-			delete packet;
-
-			return;
-		}
-
-		// MS_DEBUG_DEV(
-		//   "RTP packet received [ssrc:%" PRIu32 ", payloadType:%" PRIu8 ", producerId:%s]",
-		//   packet->GetSsrc(),
-		//   packet->GetPayloadType(),
-		//   producer->id.c_str());
-
 		// Trick for clients performing aggressive ICE regardless we are ICE-Lite.
 		this->iceServer->ForceSelectedTuple(tuple);
 
-		// Pass the RTP packet to the corresponding Producer.
-		producer->ReceiveRtpPacket(packet);
-
-		delete packet;
+		// Pass the packet to the parent transport.
+		RTC::Transport::ReceiveRtpPacket(packet);
 	}
 
-	inline void WebRtcTransport::OnRtcpDataRecv(RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
+	inline void WebRtcTransport::OnRtcpDataReceived(
+	  RTC::TransportTuple* tuple, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		// Ensure DTLS is connected.
 		if (this->dtlsTransport->GetState() != RTC::DtlsTransport::DtlsState::CONNECTED)
@@ -1207,7 +1007,7 @@ namespace RTC
 		}
 
 		// Ensure there is receiving SRTP session.
-		if (this->srtpRecvSession == nullptr)
+		if (!this->srtpRecvSession)
 		{
 			MS_DEBUG_TAG(srtp, "ignoring RTCP packet due to non receiving SRTP session");
 
@@ -1223,182 +1023,70 @@ namespace RTC
 		}
 
 		// Decrypt the SRTCP packet.
-		if (!this->srtpRecvSession->DecryptSrtcp(data, &len))
+		if (!this->srtpRecvSession->DecryptSrtcp(const_cast<uint8_t*>(data), &len))
 			return;
 
 		RTC::RTCP::Packet* packet = RTC::RTCP::Packet::Parse(data, len);
 
-		if (packet == nullptr)
+		if (!packet)
 		{
 			MS_WARN_TAG(rtcp, "received data is not a valid RTCP compound or single packet");
 
 			return;
 		}
 
-		// Handle each RTCP packet.
-		while (packet != nullptr)
-		{
-			ReceiveRtcpPacket(packet);
-
-			RTC::RTCP::Packet* previousPacket = packet;
-
-			packet = packet->GetNext();
-			delete previousPacket;
-		}
+		// Pass the packet to the parent transport.
+		RTC::Transport::ReceiveRtcpPacket(packet);
 	}
 
-	void WebRtcTransport::UserOnNewProducer(RTC::Producer* producer)
-	{
-		MS_TRACE();
-
-		auto& rtpHeaderExtensionIds = producer->GetRtpHeaderExtensionIds();
-		auto& codecs                = producer->GetRtpParameters().codecs;
-
-		// Set REMB server bitrate estimator:
-		// - if not already set, and
-		// - there is abs-send-time RTP header extension, and
-		// - there is "remb" in codecs RTCP feedback.
-		//
-		// clang-format off
-		if (
-			!this->rembServer &&
-			rtpHeaderExtensionIds.absSendTime != 0u &&
-			std::any_of(
-				codecs.begin(), codecs.end(), [](const RTC::RtpCodecParameters& codec)
-				{
-					return std::any_of(
-						codec.rtcpFeedback.begin(), codec.rtcpFeedback.end(), [](const RtcpFeedback& fb)
-						{
-							return fb.type == "goog-remb";
-						});
-				})
-		)
-		// clang-format on
-		{
-			MS_DEBUG_TAG(bwe, "enabling REMB server");
-
-			this->rembServer = new RTC::RembServer::RemoteBitrateEstimatorAbsSendTime(this);
-		}
-	}
-
-	void WebRtcTransport::UserOnNewConsumer(RTC::Consumer* consumer)
-	{
-		MS_TRACE();
-
-		auto& rtpHeaderExtensionIds = consumer->GetRtpHeaderExtensionIds();
-		auto& codecs                = consumer->GetRtpParameters().codecs;
-
-		// Set REMB client bitrate estimator:
-		// - if not already set, and
-		// - Consumer is simulcast or SVC, and
-		// - there is abs-send-time RTP header extension, and
-		// - there is "remb" in codecs RTCP feedback.
-		//
-		// clang-format off
-		if (
-			!this->rembClient &&
-			(
-				consumer->GetType() == RTC::RtpParameters::Type::SIMULCAST ||
-				consumer->GetType() == RTC::RtpParameters::Type::SVC
-			) &&
-			rtpHeaderExtensionIds.absSendTime != 0u &&
-			std::any_of(
-				codecs.begin(), codecs.end(), [](const RTC::RtpCodecParameters& codec)
-				{
-					return std::any_of(
-						codec.rtcpFeedback.begin(), codec.rtcpFeedback.end(), [](const RtcpFeedback& fb)
-						{
-							return fb.type == "goog-remb";
-						});
-				})
-		)
-		// clang-format on
-		{
-			MS_DEBUG_TAG(bwe, "enabling REMB client");
-
-			this->rembClient = new RTC::RembClient(
-			  this, this->initialAvailableOutgoingBitrate, this->minimumAvailableOutgoingBitrate);
-
-			// Tell all the Consumers that we are gonna manage their bitrate.
-			for (auto& kv : this->mapConsumers)
-			{
-				auto* consumer = kv.second;
-
-				consumer->SetExternallyManagedBitrate();
-			}
-		}
-		// Otherwise, if REMB client is set, tell the new Consumer that we are
-		// gonna manage its bitrate.
-		else if (this->rembClient)
-		{
-			consumer->SetExternallyManagedBitrate();
-		}
-	}
-
-	void WebRtcTransport::UserOnRembFeedback(RTC::RTCP::FeedbackPsRembPacket* remb)
-	{
-		MS_TRACE();
-
-		if (!this->rembClient)
-			return;
-
-		this->rembClient->ReceiveRembFeedback(remb);
-	}
-
-	inline void WebRtcTransport::OnConsumerNeedBitrateChange(RTC::Consumer* /*consumer*/)
-	{
-		MS_TRACE();
-
-		DistributeAvailableOutgoingBitrate();
-	}
-
-	inline void WebRtcTransport::OnPacketRecv(
+	inline void WebRtcTransport::OnUdpSocketPacketReceived(
 	  RTC::UdpSocket* socket, const uint8_t* data, size_t len, const struct sockaddr* remoteAddr)
 	{
 		MS_TRACE();
 
 		RTC::TransportTuple tuple(socket, remoteAddr);
 
-		OnPacketRecv(&tuple, data, len);
+		OnPacketReceived(&tuple, data, len);
 	}
 
 	inline void WebRtcTransport::OnRtcTcpConnectionClosed(
-	  RTC::TcpServer* /*tcpServer*/, RTC::TcpConnection* connection, bool isClosedByPeer)
+	  RTC::TcpServer* /*tcpServer*/, RTC::TcpConnection* connection)
 	{
 		MS_TRACE();
 
 		RTC::TransportTuple tuple(connection);
 
-		if (isClosedByPeer)
-			this->iceServer->RemoveTuple(&tuple);
+		this->iceServer->RemoveTuple(&tuple);
 	}
 
-	inline void WebRtcTransport::OnPacketRecv(
+	inline void WebRtcTransport::OnTcpConnectionPacketReceived(
 	  RTC::TcpConnection* connection, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
 
 		RTC::TransportTuple tuple(connection);
 
-		OnPacketRecv(&tuple, data, len);
+		OnPacketReceived(&tuple, data, len);
 	}
 
-	inline void WebRtcTransport::OnOutgoingStunMessage(
-	  const RTC::IceServer* /*iceServer*/, const RTC::StunMessage* msg, RTC::TransportTuple* tuple)
+	inline void WebRtcTransport::OnIceServerSendStunPacket(
+	  const RTC::IceServer* /*iceServer*/, const RTC::StunPacket* packet, RTC::TransportTuple* tuple)
 	{
 		MS_TRACE();
 
 		// Send the STUN response over the same transport tuple.
-		tuple->Send(msg->GetData(), msg->GetSize());
+		tuple->Send(packet->GetData(), packet->GetSize());
 
 		// Increase send transmission.
-		RTC::Transport::DataSent(msg->GetSize());
+		RTC::Transport::DataSent(packet->GetSize());
 	}
 
-	inline void WebRtcTransport::OnIceSelectedTuple(
-	  const RTC::IceServer* /*iceServer*/, RTC::TransportTuple* tuple)
+	inline void WebRtcTransport::OnIceServerSelectedTuple(
+	  const RTC::IceServer* /*iceServer*/, RTC::TransportTuple* /*tuple*/)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
 
 		/*
 		 * RFC 5245 section 11.2 "Receiving Media":
@@ -1407,22 +1095,21 @@ namespace RTC
 		 * on any candidates provided for that component.
 		 */
 
-		// Update the selected tuple.
-		this->iceSelectedTuple = tuple;
-
 		MS_DEBUG_TAG(ice, "ICE selected tuple");
 
 		// Notify the Node WebRtcTransport.
 		json data = json::object();
 
-		this->iceSelectedTuple->FillJson(data["iceSelectedTuple"]);
+		this->iceServer->GetSelectedTuple()->FillJson(data["iceSelectedTuple"]);
 
 		Channel::Notifier::Emit(this->id, "iceselectedtuplechange", data);
 	}
 
-	inline void WebRtcTransport::OnIceConnected(const RTC::IceServer* /*iceServer*/)
+	inline void WebRtcTransport::OnIceServerConnected(const RTC::IceServer* /*iceServer*/)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
 
 		MS_DEBUG_TAG(ice, "ICE connected");
 
@@ -1435,11 +1122,17 @@ namespace RTC
 
 		// If ready, run the DTLS handler.
 		MayRunDtlsTransport();
+
+		// If DTLS was already connected, notify the parent class.
+		if (this->dtlsTransport->GetState() == RTC::DtlsTransport::DtlsState::CONNECTED)
+			RTC::Transport::Connected();
 	}
 
-	inline void WebRtcTransport::OnIceCompleted(const RTC::IceServer* /*iceServer*/)
+	inline void WebRtcTransport::OnIceServerCompleted(const RTC::IceServer* /*iceServer*/)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
 
 		MS_DEBUG_TAG(ice, "ICE completed");
 
@@ -1452,14 +1145,17 @@ namespace RTC
 
 		// If ready, run the DTLS handler.
 		MayRunDtlsTransport();
+
+		// If DTLS was already connected, notify the parent class.
+		if (this->dtlsTransport->GetState() == RTC::DtlsTransport::DtlsState::CONNECTED)
+			RTC::Transport::Connected();
 	}
 
-	inline void WebRtcTransport::OnIceDisconnected(const RTC::IceServer* /*iceServer*/)
+	inline void WebRtcTransport::OnIceServerDisconnected(const RTC::IceServer* /*iceServer*/)
 	{
 		MS_TRACE();
 
-		// Unset the selected tuple.
-		this->iceSelectedTuple = nullptr;
+		MS_ASSERT(this->iceServer, "no iceServer");
 
 		MS_DEBUG_TAG(ice, "ICE disconnected");
 
@@ -1470,13 +1166,17 @@ namespace RTC
 
 		Channel::Notifier::Emit(this->id, "icestatechange", data);
 
-		// Tell the parent class.
-		RTC::Transport::Disconnected();
+		// If DTLS was already connected, notify the parent class.
+		if (this->dtlsTransport->GetState() == RTC::DtlsTransport::DtlsState::CONNECTED)
+			RTC::Transport::Disconnected();
 	}
 
-	inline void WebRtcTransport::OnDtlsConnecting(const RTC::DtlsTransport* /*dtlsTransport*/)
+	inline void WebRtcTransport::OnDtlsTransportConnecting(const RTC::DtlsTransport* /*dtlsTransport*/)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		MS_DEBUG_TAG(dtls, "DTLS connecting");
 
@@ -1488,7 +1188,7 @@ namespace RTC
 		Channel::Notifier::Emit(this->id, "dtlsstatechange", data);
 	}
 
-	inline void WebRtcTransport::OnDtlsConnected(
+	inline void WebRtcTransport::OnDtlsTransportConnected(
 	  const RTC::DtlsTransport* /*dtlsTransport*/,
 	  RTC::SrtpSession::Profile srtpProfile,
 	  uint8_t* srtpLocalKey,
@@ -1499,15 +1199,18 @@ namespace RTC
 	{
 		MS_TRACE();
 
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
+
 		MS_DEBUG_TAG(dtls, "DTLS connected");
 
 		// Close it if it was already set and update it.
-		if (this->srtpSendSession != nullptr)
+		if (this->srtpSendSession)
 		{
 			delete this->srtpSendSession;
 			this->srtpSendSession = nullptr;
 		}
-		if (this->srtpRecvSession != nullptr)
+		if (this->srtpRecvSession)
 		{
 			delete this->srtpRecvSession;
 			this->srtpRecvSession = nullptr;
@@ -1548,9 +1251,12 @@ namespace RTC
 		RTC::Transport::Connected();
 	}
 
-	inline void WebRtcTransport::OnDtlsFailed(const RTC::DtlsTransport* /*dtlsTransport*/)
+	inline void WebRtcTransport::OnDtlsTransportFailed(const RTC::DtlsTransport* /*dtlsTransport*/)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		MS_WARN_TAG(dtls, "DTLS failed");
 
@@ -1562,9 +1268,12 @@ namespace RTC
 		Channel::Notifier::Emit(this->id, "dtlsstatechange", data);
 	}
 
-	inline void WebRtcTransport::OnDtlsClosed(const RTC::DtlsTransport* /*dtlsTransport*/)
+	inline void WebRtcTransport::OnDtlsTransportClosed(const RTC::DtlsTransport* /*dtlsTransport*/)
 	{
 		MS_TRACE();
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
 		MS_WARN_TAG(dtls, "DTLS remotely closed");
 
@@ -1579,77 +1288,38 @@ namespace RTC
 		RTC::Transport::Disconnected();
 	}
 
-	inline void WebRtcTransport::OnOutgoingDtlsData(
+	inline void WebRtcTransport::OnDtlsTransportSendData(
 	  const RTC::DtlsTransport* /*dtlsTransport*/, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
 
-		if (this->iceSelectedTuple == nullptr)
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
+
+		MS_ASSERT(this->iceServer, "no iceServer");
+
+		if (!this->iceServer->GetSelectedTuple())
 		{
 			MS_WARN_TAG(dtls, "no selected tuple set, cannot send DTLS packet");
 
 			return;
 		}
 
-		this->iceSelectedTuple->Send(data, len);
+		this->iceServer->GetSelectedTuple()->Send(data, len);
 
 		// Increase send transmission.
 		RTC::Transport::DataSent(len);
 	}
 
-	inline void WebRtcTransport::OnDtlsApplicationData(
-	  const RTC::DtlsTransport* /*dtlsTransport*/, const uint8_t* /*data*/, size_t len)
+	inline void WebRtcTransport::OnDtlsTransportApplicationDataReceived(
+	  const RTC::DtlsTransport* /*dtlsTransport*/, const uint8_t* data, size_t len)
 	{
 		MS_TRACE();
 
-		MS_DEBUG_TAG(dtls, "DTLS application data received [size:%zu]", len);
+		MS_ASSERT(this->iceServer, "no iceServer");
+		MS_ASSERT(this->dtlsTransport, "no dtlsTransport");
 
-		// NOTE: No DataChannel support, so just ignore it.
-	}
-
-	inline void WebRtcTransport::OnRembClientAvailableBitrate(
-	  RTC::RembClient* /*rembClient*/, uint32_t availableBitrate)
-	{
-		MS_TRACE();
-
-		MS_DEBUG_TAG(bwe, "outgoing available bitrate [bitrate:%" PRIu32 "bps]", availableBitrate);
-
-		DistributeAvailableOutgoingBitrate();
-	}
-
-	inline void WebRtcTransport::OnRembServerAvailableBitrate(
-	  const RTC::RembServer::RemoteBitrateEstimator* /*rembServer*/,
-	  const std::vector<uint32_t>& ssrcs,
-	  uint32_t availableBitrate)
-	{
-		MS_TRACE();
-
-		// Limit announced bitrate if requested via API.
-		if (this->maxIncomingBitrate != 0u)
-			availableBitrate = std::min(availableBitrate, this->maxIncomingBitrate);
-
-		if (MS_HAS_DEBUG_TAG(bwe))
-		{
-			std::ostringstream ssrcsStream;
-
-			if (!ssrcs.empty())
-			{
-				std::copy(ssrcs.begin(), ssrcs.end() - 1, std::ostream_iterator<uint32_t>(ssrcsStream, ","));
-				ssrcsStream << ssrcs.back();
-			}
-
-			// MS_DEBUG_TAG(
-			//   bwe,
-			//   "sending RTCP REMB packet [bitrate:%" PRIu32 "bps, ssrcs:%s]",
-			//   availableBitrate,
-			//   ssrcsStream.str().c_str());
-		}
-
-		RTC::RTCP::FeedbackPsRembPacket packet(0, 0);
-
-		packet.SetBitrate(availableBitrate);
-		packet.SetSsrcs(ssrcs);
-		packet.Serialize(RTC::RTCP::Buffer);
-		SendRtcpPacket(&packet);
+		// Pass it to the parent transport.
+		RTC::Transport::ReceiveSctpData(data, len);
 	}
 } // namespace RTC
